@@ -30,15 +30,16 @@ services:
         max-file: "3"
 
   clamav:
-    image: mkodockx/docker-clamav:alpine
+    # Official image (preloaded signatures). Old mkodockx/0.104 gets CDN 403 and has no clamdcheck.
+    image: clamav/clamav:stable
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
-      test: ["CMD-SHELL", "clamdcheck || exit 1"]
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 12
+      start_period: 360s
     restart: unless-stopped
     logging:
       driver: json-file

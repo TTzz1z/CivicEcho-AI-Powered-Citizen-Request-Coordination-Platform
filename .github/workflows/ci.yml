@@ -211,50 +211,64 @@ jobs:
             'SEED_PASSWORD=CI-Seed-Only-From-Workflow-2026!' \
             > .env.prod
       - name: Validate production compose
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod config -q
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod config -q
       - name: Start production compose
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build
       - name: Wait for core services (postgres/minio/backend)
         run: |
           set -eux
           for i in $(seq 1 60); do
-            if docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
+            if docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
               echo "backend ready"
               break
             fi
             sleep 5
           done
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
       - name: Wait for ClamAV
         run: |
           set -eux
-          for i in $(seq 1 72); do
-            status=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod ps --format json clamav | python -c "import sys,json; d=json.load(sys.stdin); print((d[0] if isinstance(d,list) else d).get('Health','') if d else '')" || true)
+          for i in $(seq 1 90); do
+            status=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps --format json clamav | python -c "import sys,json; raw=sys.stdin.read().strip();
+import json as J
+objs=[]
+for line in raw.splitlines():
+  line=line.strip()
+  if not line: continue
+  objs.append(J.loads(line) if line.startswith('{') else None)
+# compose may emit NDJSON or a JSON array
+if raw.startswith('['):
+  data=J.loads(raw); row=data[0] if data else {}
+elif objs:
+  row=objs[0]
+else:
+  row={}
+print(row.get('Health') or row.get('State') or '')" || true)
             echo "clamav health=$status attempt=$i"
             if echo "$status" | grep -qi healthy; then
               exit 0
             fi
             sleep 10
           done
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod ps
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs --no-color --tail=100 clamav
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=120 clamav
           exit 1
       - name: Alembic head and health
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend alembic current
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend alembic current
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"
       - name: Seed demo profile
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T -e SEED_PASSWORD -e SEED_PROFILE=demo backend python -m app.seed
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T -e SEED_PASSWORD -e SEED_PROFILE=demo backend python -m app.seed
       - name: Verify ClamAV scanner rejects EICAR
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python - <<'PY'
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python - <<'PY'
           from datetime import datetime, timezone
           from io import BytesIO
           from app.malware_scanner import get_malware_scanner
           eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
           result = get_malware_scanner().scan(BytesIO(eicar), "eicar.txt", "text/plain")
-          print({"status": result.status, "detail": result.detail, "engine": result.engine, "scanned_at": result.scanned_at.isoformat() if isinstance(result.scanned_at, datetime) else result.scanned_at})
+          print({"status": result.status, "detail": result.detail, "engine": result.engine})
           assert result.status == "infected", result
           PY
       - if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs --no-color --tail=200 && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod down -v
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=200 && docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod down -v

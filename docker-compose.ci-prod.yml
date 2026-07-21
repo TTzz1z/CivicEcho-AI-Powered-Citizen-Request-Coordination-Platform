@@ -1,0 +1,7 @@
+# CI-only override for production-compose job.
+# ClamAV signature download often exceeds compose depends_on wait; wait separately in the workflow.
+services:
+  backend:
+    depends_on:
+      clamav:
+        condition: service_started

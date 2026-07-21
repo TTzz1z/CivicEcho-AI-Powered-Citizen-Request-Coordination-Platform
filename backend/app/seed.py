@@ -1114,11 +1114,12 @@ def seed(profile: str | None = None) -> dict[str, int]:
                 ))
                 ticket.collaboration_status = "in_progress"
 
-            # --- Knowledge Base demo data ---
+        # KB is required for e2e smoke S4 (policy RAG citations). Skip demo ticket above for e2e isolation.
+        if profile in {"demo", "development", "e2e"}:
             kb_doc_ids_by_key = _seed_kb_documents(db, users, department_ids)
             counts["kb_documents"] = len(kb_doc_ids_by_key)
-            # --- Evaluation cases ---
-            counts["kb_eval_cases"] = _seed_kb_eval_cases(db, kb_doc_ids_by_key)
+            if profile in {"demo", "development"}:
+                counts["kb_eval_cases"] = _seed_kb_eval_cases(db, kb_doc_ids_by_key)
         db.commit()
     return counts
 

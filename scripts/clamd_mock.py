@@ -3,6 +3,8 @@
 Responds:
 - EICAR payload -> stream: Eicar-Test-Signature FOUND
 - anything else -> stream: OK
+
+Accepts both null-terminated (zINSTREAM\\0) and newline-terminated commands.
 """
 from __future__ import annotations
 
@@ -16,12 +18,16 @@ EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 class ClamdHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         sock = self.request
+        sock.settimeout(10)
         cmd = b""
-        while not cmd.endswith(b"\n") and len(cmd) < 64:
+        while len(cmd) < 64:
             chunk = sock.recv(1)
             if not chunk:
                 return
             cmd += chunk
+            # Stock clamd client uses zINSTREAM\0; some tools use nINSTREAM\n.
+            if cmd.endswith(b"\0") or cmd.endswith(b"\n"):
+                break
         if b"INSTREAM" not in cmd.upper():
             sock.sendall(b"ERROR\n")
             return

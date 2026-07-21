@@ -93,4 +93,30 @@ describe('chatStorage privacy', () => {
     expect(localStorage.getItem('tingting_chat_web-user-1')).toBeNull()
     expect(localStorage.getItem('tingting_chat_draft_web-user-1')).toBeNull()
   })
+
+  it('redacts id card and phone in persisted messages', async () => {
+    const { redactSensitiveText, saveChatMessages, loadChatMessages } = await import('./chatStorage')
+    expect(redactSensitiveText('身份证110101199001011234 手机13812345678')).toContain('[身份证已脱敏]')
+    expect(redactSensitiveText('请联系13812345678')).toContain('[手机号已脱敏]')
+    const key = 'tingting_chat_web-user-pii'
+    saveChatMessages(key, [{ id: '1', text: '我的手机是13812345678' }])
+    const loaded = loadChatMessages<{ id: string; text: string }>(key)
+    expect(loaded[0]?.text).toContain('[手机号已脱敏]')
+    expect(JSON.stringify(loaded)).not.toContain('13812345678')
+  })
+
+  it('broadcasts multi-tab privacy clear via BroadcastChannel', async () => {
+    const { clearChatPrivacyStorageAndBroadcast, subscribeChatPrivacyClear, chatStorageKeys } = await import('./chatStorage')
+    expect(chatStorageKeys.PRIVACY_CLEAR_SIGNAL).toBe('tingting_privacy_clear')
+    expect(chatStorageKeys.PRIVACY_CHANNEL).toBe('tingting-chat-privacy')
+    const onClear = vi.fn()
+    const unsubscribe = subscribeChatPrivacyClear(onClear)
+    localStorage.setItem('tingting_chat_web-user-x', 'keep-until-clear')
+    clearChatPrivacyStorageAndBroadcast()
+    expect(localStorage.getItem('tingting_chat_web-user-x')).toBeNull()
+    if (typeof BroadcastChannel !== 'undefined') {
+      await vi.waitFor(() => expect(onClear).toHaveBeenCalled())
+    }
+    unsubscribe()
+  })
 })

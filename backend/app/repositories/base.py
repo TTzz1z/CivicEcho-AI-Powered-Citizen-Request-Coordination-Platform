@@ -36,7 +36,7 @@ class TicketRepository(ABC):
     def transition(
         self, ticket_id: str, expected_version: int, status: str,
         operation_type: str, content: str, operator_user_id: int | None,
-        updates: dict, visibility: str = "internal",
+        updates: dict, visibility: str = "internal", *, commit: bool = True,
     ) -> Optional[TicketModel]: ...
 
     @abstractmethod

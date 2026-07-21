@@ -1,13 +1,14 @@
-import { Alert, Badge, Button, Card, Descriptions, Drawer, Grid, Input, Space, Spin, Tag, Timeline, Typography, message } from 'antd'
+import { Alert, Badge, Button, Card, Drawer, Grid, Input, Space, Spin, Tag, Typography, message } from 'antd'
 import { DeleteOutlined, FileTextOutlined, HomeOutlined, LoginOutlined, ReloadOutlined, SafetyCertificateOutlined, SendOutlined } from '@ant-design/icons'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { sendOrchestrator, type OrchestratorResult } from '../api/orchestrator'
 import { sendRasaMessage } from '../api/rasa'
 import { useAuth } from '../auth/AuthContext'
 import { api } from '../api/client'
-import type { DraftPayload, RasaMessage } from '../types'
+import type { DraftPayload, KbCitation } from '../types'
 import { PageHeader } from '../components/PageHeader'
+import { PolicyCitations } from '../components/PolicyCitations'
 import { TicketDraftPanel, type DraftState } from '../components/TicketDraftPanel'
 import { ensureChineseReply } from '../utils/languageGuard'
 import {
@@ -19,6 +20,7 @@ import {
 } from '../utils/chatStorage'
 
 type ChatItem = { id: string; side: 'user' | 'bot'; text: string; route?: string; payload?: Record<string, unknown>; buttons?: { title: string; payload: string }[]; cacheHit?: boolean; degraded?: boolean; degradeReason?: string; rateLimited?: boolean; budgetExceeded?: boolean; requiresLlm?: boolean; modelTier?: string }
+type BindState = 'idle' | 'binding' | 'success' | 'empty' | 'failed'
 const suggestions = [
   { title: '我要提交一条投诉', hint: 'ticket_intake' },
   { title: '我想提出建议', hint: 'suggestion_intake' },
@@ -39,6 +41,8 @@ export function ChatPage() {
   const [dynamicFields, setDynamicFields] = useState<Record<string, unknown>[]>([])
   const [currentRoute, setCurrentRoute] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [bindState, setBindState] = useState<BindState>('idle')
+  const [boundCount, setBoundCount] = useState<number | null>(null)
   // Per-conversation id: rotate on "新建会话" so turn counters / guards / ai_usage_logs stay isolated.
   // Kept in sessionStorage so a refresh continues the same conversation.
   const [sessionId, setSessionId] = useState<string>(() => {
@@ -56,12 +60,54 @@ export function ChatPage() {
     if (prev !== user?.id) {
       clearChatPrivacyOnAccountSwitch(prev, user?.id)
       prevUserIdRef.current = user?.id
+      setBindState('idle')
+      setBoundCount(null)
     }
   }, [user?.id])
 
   useEffect(() => { saveChatMessages(storageKey, messages); const viewport = messagesViewport.current; viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' }) }, [messages, storageKey])
   useEffect(() => { if (draft) saveChatDraft(draftKey, draft); else localStorage.removeItem(draftKey) }, [draft, draftKey])
-  useEffect(() => { if (!isCitizen) return; const anonId = localStorage.getItem('tingting_sender_id'); if (!anonId || anonId.startsWith('web-user-')) return; const boundKey = `tingting_bound_${user?.id}`; if (sessionStorage.getItem(boundKey)) return; api.post('/tickets/bind-anonymous', { sender_id: anonId }).then(() => sessionStorage.setItem(boundKey, '1')).catch(() => {}) }, [isCitizen, user?.id])
+
+  const bindAnonymous = useCallback(async () => {
+    if (!isCitizen || !user?.id) return
+    const anonId = localStorage.getItem('tingting_sender_id')
+    if (!anonId || anonId.startsWith('web-user-')) {
+      setBindState('success')
+      setBoundCount(0)
+      return
+    }
+    const boundKey = `tingting_bound_${user.id}`
+    if (sessionStorage.getItem(boundKey) === '1') {
+      setBindState('success')
+      return
+    }
+    if (sessionStorage.getItem(boundKey) === 'empty') {
+      setBindState('empty')
+      setBoundCount(0)
+      return
+    }
+    setBindState('binding')
+    try {
+      const res = await api.post<{ data?: { bound_count?: number }; bound_count?: number }>('/tickets/bind-anonymous', { sender_id: anonId })
+      const count = Number(res.data?.data?.bound_count ?? res.data?.bound_count ?? 0)
+      setBoundCount(count)
+      if (count > 0) {
+        sessionStorage.setItem(boundKey, '1')
+        setBindState('success')
+        message.success(`已绑定 ${count} 条匿名会话工单到当前账号`)
+      } else {
+        sessionStorage.setItem(boundKey, 'empty')
+        setBindState('empty')
+        message.info('当前账号已登录；未发现可绑定的匿名会话工单')
+      }
+    } catch {
+      setBindState('failed')
+      setBoundCount(null)
+      message.error('匿名工单绑定失败，请重试')
+    }
+  }, [isCitizen, user?.id])
+
+  useEffect(() => { void bindAnonymous() }, [bindAnonymous])
 
   const submit = async (raw = input, routeHint?: string) => {
     const text = raw.trim(); if (!text || sending) return
@@ -102,7 +148,7 @@ export function ChatPage() {
     finally { setSending(false) }
   }
 
-  const handleOrchestratorResult = (result: OrchestratorResult, originalText: string) => {
+  const handleOrchestratorResult = (result: OrchestratorResult, _originalText: string) => {
     setCurrentRoute(result.route)
 
     // Handle ticket draft routes
@@ -162,7 +208,9 @@ export function ChatPage() {
   const missingCount = draft ? draftMissing.filter(f => !draft[f as keyof DraftState]).length : 0
 
   return <div className="chat-page"><PageHeader eyebrow="SMART SERVICE" title="智能对话" description="政策咨询、投诉建议、工单查询——统一入口，智能路由。" extra={isPublicChat?<Space wrap><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user&&<Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</Space>:undefined} /><div className={`chat-shell${draft && screens.md ? ' has-draft' : ''}`}>
-    <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button><Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}{isCitizen?<Alert style={{ marginTop: 16 }} type="success" showIcon message="已绑定市民账号" description={'工单将进入"我的工单"。'} />:<Alert style={{ marginTop: 16 }} type="warning" showIcon message={user?'当前不是市民角色':'访客模式'} description={user?'请切换市民账号提交工单。':<span>{'登录市民账号后可提交工单。'}<Link to="/login">去登录</Link></span>} />}</aside>
+    <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button><Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}
+      <BindStatusAlert isCitizen={!!isCitizen} hasUser={!!user} bindState={bindState} boundCount={boundCount} onRetry={() => { if (user?.id) sessionStorage.removeItem(`tingting_bound_${user.id}`); void bindAnonymous() }} />
+    </aside>
     <section className="chat-main" aria-label="智能对话区"><div ref={messagesViewport} className="messages" aria-live="polite">{messages.length === 0 && <div style={{ margin: 'auto', textAlign: 'center', maxWidth: 480 }}><div className="brand-mark" style={{ margin: '0 auto 18px', color: '#167c72', borderColor: '#82bdb6' }}>倾</div><Typography.Title level={3}>你好，我是倾听助手</Typography.Title><Typography.Paragraph type="secondary">我可以帮您咨询政策、提交投诉建议、查询工单进度。请直接描述您的需求。</Typography.Paragraph><Space wrap style={{ justifyContent: 'center' }}>{suggestions.map(s => <Tag key={s.hint} style={{ cursor: 'pointer', padding: '7px 11px' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Tag>)}</Space></div>}
       {messages.map(m => <div className={`message-row ${m.side}`} key={m.id}><div className="bubble">
         <RouteMessage item={m} />
@@ -183,13 +231,98 @@ export function ChatPage() {
   </div>
 }
 
+export function BindStatusAlert({
+  isCitizen, hasUser, bindState, boundCount, onRetry,
+}: {
+  isCitizen: boolean
+  hasUser: boolean
+  bindState: BindState
+  boundCount: number | null
+  onRetry: () => void
+}) {
+  if (!isCitizen) {
+    return (
+      <Alert
+        style={{ marginTop: 16 }}
+        type="warning"
+        showIcon
+        message={hasUser ? '当前不是市民角色' : '访客模式'}
+        description={hasUser ? '请切换市民账号提交工单。' : <span>登录市民账号后可提交工单。<Link to="/login">去登录</Link></span>}
+      />
+    )
+  }
+  if (bindState === 'failed') {
+    return (
+      <Alert
+        style={{ marginTop: 16 }}
+        type="error"
+        showIcon
+        data-testid="bind-failed"
+        message="匿名工单绑定失败"
+        description={
+          <Space direction="vertical" size={8}>
+            <span>绑定未完成，请重试。失败时不会标记为已绑定。</span>
+            <Button size="small" onClick={onRetry}>重试绑定</Button>
+          </Space>
+        }
+      />
+    )
+  }
+  if (bindState === 'empty') {
+    return (
+      <Alert
+        style={{ marginTop: 16 }}
+        type="info"
+        showIcon
+        data-testid="bind-empty"
+        message="市民账号已登录"
+        description="未发现可绑定的匿名会话工单；新提交的工单将进入“我的工单”。"
+      />
+    )
+  }
+  if (bindState === 'binding') {
+    return (
+      <Alert
+        style={{ marginTop: 16 }}
+        type="info"
+        showIcon
+        data-testid="bind-binding"
+        message="正在绑定匿名会话…"
+        description="请稍候，正在将访客会话中的工单关联到当前账号。"
+      />
+    )
+  }
+  if (bindState === 'success') {
+    return (
+      <Alert
+        style={{ marginTop: 16 }}
+        type="success"
+        showIcon
+        data-testid="bind-success"
+        message="已绑定市民账号"
+        description={boundCount && boundCount > 0 ? `已关联 ${boundCount} 条匿名会话工单；后续工单将进入“我的工单”。` : '工单将进入“我的工单”。'}
+      />
+    )
+  }
+  return (
+    <Alert
+      style={{ marginTop: 16 }}
+      type="info"
+      showIcon
+      data-testid="bind-idle"
+      message="市民账号已登录"
+      description="正在检查是否需要绑定匿名会话工单…"
+    />
+  )
+}
+
 function routeLabel(route: string): string {
   const map: Record<string, string> = { policy_rag: '政策咨询', service_guide: '办事指南', ticket_intake: '投诉/报修', suggestion_intake: '意见建议', ticket_progress: '工单查询', department_navigation: '部门导航', emergency_route: '紧急事项', general_chat: '日常对话', human_handoff: '人工服务', clarify: '信息确认' }
   return map[route] || route
 }
 
 /** Rewrite legacy Rasa localmode copy that falsely implies a ticket was created. */
-function sanitizeRasaFallbackText(text: string): string {
+export function sanitizeRasaFallbackText(text: string): string {
   const guarded = ensureChineseReply(text)
   const hasRealTicketId = /QT\d{12,16}/i.test(guarded)
   const claimsSuccess = /已收到您的诉求|工单已创建|请前往[“"]?我的工单|后续办理进度/.test(guarded)
@@ -216,8 +349,13 @@ function degradeBannerText(reason?: string): string | null {
   return DEGRADE_LABELS[reason] || `当前回答已降级：${reason}`
 }
 
+function asCitations(payload?: Record<string, unknown>): KbCitation[] {
+  const raw = payload?.citations
+  return Array.isArray(raw) ? (raw as KbCitation[]) : []
+}
+
 /** Route-specific message rendering */
-function RouteMessage({ item }: { item: ChatItem }) {
+export function RouteMessage({ item }: { item: ChatItem }) {
   const { route, payload, text } = item
 
   // Emergency: show alert style
@@ -225,16 +363,19 @@ function RouteMessage({ item }: { item: ChatItem }) {
     return <Alert type="error" showIcon icon={<SafetyCertificateOutlined />} message="紧急提示" description={<span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>} />
   }
 
-  // Policy / Service guide: show structured card
+  // Policy / Service guide: show structured card + citations (never invent sources on no_evidence)
   if (route === 'policy_rag' || route === 'service_guide') {
     const banner = item.degraded ? degradeBannerText(item.degradeReason) : null
+    const noEvidence = payload?.no_evidence === true
+    const citations = asCitations(payload)
     return (
-      <Card size="small" style={{ background: '#f8fffe', border: '1px solid #d9f0ec' }}>
+      <Card size="small" style={{ background: '#f8fffe', border: '1px solid #d9f0ec' }} data-testid="policy-answer-card">
         {banner && <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={banner} />}
-        {payload?.no_evidence === true && (
-          <Alert type="info" showIcon style={{ marginBottom: 10 }} message="未找到可引用政策依据，以下为引导说明，不是政策原文。" />
+        {noEvidence && (
+          <Alert type="info" showIcon style={{ marginBottom: 10 }} data-testid="no-evidence-banner" message="未找到可引用政策依据，以下为引导说明，不是政策原文。" />
         )}
         <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{text}</Typography.Paragraph>
+        <PolicyCitations citations={citations} noEvidence={noEvidence} compact />
         <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>以上为 AI 参考解答，具体以官方政策为准。如需进一步处理，可说明"我要投诉"转为工单。</Typography.Text>
       </Card>
     )

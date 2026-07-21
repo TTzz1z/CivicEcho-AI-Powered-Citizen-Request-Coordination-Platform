@@ -154,7 +154,8 @@ export interface KbChunkPage { items: KbChunk[]; total: number; page: number; pa
 
 export interface KbCitation {
   index: number; doc_id: number; title: string
-  doc_number?: string | null; kb_type?: KbType | null
+  doc_number?: string | null; issuing_authority?: string | null
+  kb_type?: KbType | null
   department?: string | null; published_at?: string | null
   effective_at?: string | null; expires_at?: string | null
   status?: string | null; version?: number | null
@@ -247,6 +248,8 @@ export interface KbEvalRunResult {
 }
 
 export interface KbTicketAdvice {
+  /** Stable suggestion id for audit / review evidence chain (backend advice_id). */
+  advice_id?: string
   applicable_policies: string[]
   verification_needed: string[]
   material_completeness: string
@@ -259,4 +262,6 @@ export interface KbTicketAdvice {
   no_evidence: boolean
   generated_at: string
   provider?: string; model?: string
+  /** Optional suggestion schema / content version from backend. */
+  suggestion_version?: number | string | null
 }

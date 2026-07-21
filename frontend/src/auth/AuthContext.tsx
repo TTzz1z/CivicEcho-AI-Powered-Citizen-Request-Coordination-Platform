@@ -2,7 +2,12 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { getMe } from '../api/auth'
 import { tokenStore } from '../api/client'
 import type { User } from '../types'
-import { clearChatPrivacyOnAccountSwitch, clearChatPrivacyStorage } from '../utils/chatStorage'
+import {
+  clearChatPrivacyOnAccountSwitch,
+  clearChatPrivacyStorage,
+  clearChatPrivacyStorageAndBroadcast,
+  subscribeChatPrivacyClear,
+} from '../utils/chatStorage'
 
 interface AuthState { user:User|null; loading:boolean; refresh:()=>Promise<User|null>; logout:()=>void }
 const AuthContext=createContext<AuthState|null>(null)
@@ -21,7 +26,7 @@ export function AuthProvider({children}:{children:ReactNode}){
     finally{setLoading(false)}
   }
   const logout=()=>{
-    clearChatPrivacyStorage()
+    clearChatPrivacyStorageAndBroadcast()
     previousUserId.current=undefined
     tokenStore.clear()
     setUser(null)
@@ -29,12 +34,22 @@ export function AuthProvider({children}:{children:ReactNode}){
   useEffect(()=>{
     void refresh()
     const unauthorized=()=>{
-      clearChatPrivacyStorage()
+      clearChatPrivacyStorageAndBroadcast()
       previousUserId.current=undefined
       setUser(null)
     }
     window.addEventListener('tingting:unauthorized',unauthorized)
-    return()=>window.removeEventListener('tingting:unauthorized',unauthorized)
+    const unsubscribe=subscribeChatPrivacyClear(()=>{
+      // Other tab logged out — clear this tab's storage + session auth state.
+      clearChatPrivacyStorage()
+      previousUserId.current=undefined
+      tokenStore.clear()
+      setUser(null)
+    })
+    return()=>{
+      window.removeEventListener('tingting:unauthorized',unauthorized)
+      unsubscribe()
+    }
   },[])
   return <AuthContext.Provider value={{user,loading,refresh,logout}}>{children}</AuthContext.Provider>
 }

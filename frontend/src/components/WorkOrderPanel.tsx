@@ -80,7 +80,15 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
       return resolveTicketDispute(ticket.ticket_id,{version:ticket.version,remark:v.remark!,resolution:v.resolution!,primary_work_order_id:v.primary_work_order_id})
     },
     onSuccess:()=>{message.success('协同操作已完成');close();onChanged()},
-    onError:e=>message.error(e instanceof ApiError?e.message:'协同操作失败'),
+    onError:e=>{
+      if(e instanceof ApiError&&e.status===409){
+        message.warning('数据已被他人更新，已为你加载最新工单')
+        close()
+        onChanged()
+        return
+      }
+      message.error(e instanceof ApiError?e.message:'协同操作失败')
+    },
   })
   const options=departments.data?.filter(x=>x.is_active).map(x=>({value:x.id,label:x.name}))
   const staffOptions=staff.data?.map(x=>({value:x.id,label:x.display_name}))

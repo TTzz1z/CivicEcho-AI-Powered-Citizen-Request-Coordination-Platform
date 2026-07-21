@@ -108,8 +108,11 @@ cd frontend; npm run build
 # Playwright Smoke(6 条核心路径, Chromium; GitHub Actions 日常 CI 同此)
 cd frontend; npx playwright test e2e/smoke.spec.ts --project=chromium
 
-# Playwright 全量 E2E（预发布/面试前本地用，约 20 min）
-sh scripts/run-e2e.sh
+# Playwright 全量 E2E（workflow_dispatch / tag 门禁，约 20 min）
+sh scripts/run-e2e.sh full
+
+# 生产等价 Compose（Caddy + ClamAV；容器内 MinIO HTTP）
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build --wait
 
 # Alembic 升降级 + 漂移检查
 docker compose exec -T backend alembic upgrade head
@@ -158,7 +161,7 @@ helpdesk-assistant-main/
 │   │   ├── llm_client.py     # DeepSeek 客户端
 │   │   ├── embedding_client.py # SiliconFlow Embedding 客户端
 │   │   └── seed.py            # 幂等 Seed
-│   ├── migrations/versions/  # Alembic 迁移 0001-0022
+│   ├── migrations/versions/  # Alembic 迁移 0001-0023
 │   ├── scripts/              # demo_reset.py / verify_r*.py
 │   └── tests/                # pytest 用例
 ├── frontend/

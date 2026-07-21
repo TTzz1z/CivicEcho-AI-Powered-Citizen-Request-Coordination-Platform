@@ -781,6 +781,7 @@ class AdviceReviewRequest(BaseModel):
     auto-reject, auto-close or auto-send the final reply. A human operator
     must explicitly adopt, adopt-with-edits, or reject each advice.
     """
+    advice_id: str = Field(..., min_length=8, max_length=36, description="ticket_advice 返回的稳定建议 ID")
     decision: str = Field(..., description="adopted | adopted_with_edits | rejected")
     edit_summary: Optional[str] = Field(default=None, max_length=1000,
                                          description="修改内容摘要（仅 adopted_with_edits 必填）")
@@ -797,13 +798,16 @@ def ticket_advice_review(
 ):
     """Record the human operator's three-state decision on AI ticket advice.
 
-    Decisions are recorded in audit_logs (action=ai_advice_review) — no
-    ticket status change is made here. The AI advice remains advisory only.
+    Decisions update ai_suggestions and audit_logs — no ticket status change.
     """
+    import hashlib
+    import json
+    from datetime import datetime, timezone
+
     from ..authorization import AuthorizationPolicy
     from ..errors import BusinessError, PermissionDenied, TicketNotFound
+    from ..models import AiSuggestionModel
     from ..repositories.ai import AiRepository
-    from datetime import datetime, timezone
 
     valid_decisions = {"adopted", "adopted_with_edits", "rejected"}
     if payload.decision not in valid_decisions:
@@ -820,30 +824,59 @@ def ticket_advice_review(
     if principal.role not in {"department_staff", "agent", "admin"}:
         raise PermissionDenied("只有工作人员可以审核 AI 办件建议")
 
-    operated_at = datetime.now(timezone.utc).isoformat()
+    suggestion = service.db.get(AiSuggestionModel, payload.advice_id)
+    if (
+        not suggestion
+        or suggestion.suggestion_type != "ticket_advice"
+        or suggestion.ticket_id != ticket.ticket_id
+    ):
+        raise BusinessError("ADVICE_NOT_FOUND", "未找到对应工单的 AI 建议", 404)
+    if suggestion.review_decision:
+        raise BusinessError("ADVICE_ALREADY_REVIEWED", "该建议已审核，请勿重复提交", 409)
+
+    snapshot = payload.advice_snapshot
+    if snapshot is None:
+        try:
+            snapshot = json.loads(suggestion.result_json) if suggestion.result_json else {}
+        except (TypeError, ValueError):
+            snapshot = {}
+    snapshot_hash = hashlib.sha256(
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+    operated_at = datetime.now(timezone.utc)
+    suggestion.review_decision = payload.decision
+    suggestion.review_comment = payload.edit_summary
+    suggestion.reviewed_by_user_id = principal.user_id
+    suggestion.reviewed_at = operated_at
+    service.db.commit()
+
+    operated_at_iso = operated_at.isoformat()
     service.audit.log(
         principal, "ai_advice_review",
         resource_type="ticket", resource_id=ticket_id,
         details={
+            "advice_id": payload.advice_id,
             "decision": payload.decision,
             "edit_summary": payload.edit_summary,
+            "advice_snapshot": snapshot,
+            "advice_snapshot_hash": snapshot_hash,
             "operator_user_id": principal.user_id,
             "operator_role": principal.role,
-            "operated_at": operated_at,
+            "operated_at": operated_at_iso,
             "advisory_only": True,
-            # NOTE: no ticket status change — AI advice never auto-dispatches
-            # / auto-transfers / auto-rejects / auto-closes / auto-sends.
         },
     )
     return SuccessResponse(data={
         "ticket_id": ticket_id,
+        "advice_id": payload.advice_id,
         "decision": payload.decision,
         "edit_summary": payload.edit_summary,
         "operator_user_id": principal.user_id,
         "operator_role": principal.role,
-        "operated_at": operated_at,
+        "operated_at": operated_at_iso,
         "advisory_only": True,
-        "status_changed": False,  # explicit: this endpoint does NOT touch ticket status
+        "status_changed": False,
     })
 
 
@@ -899,6 +932,8 @@ def list_ticket_advice_reviews(
             "decision": details.get("decision"),
             "edit_summary": details.get("edit_summary"),
             "advice_snapshot": details.get("advice_snapshot"),
+            "advice_id": details.get("advice_id"),
+            "advice_snapshot_hash": details.get("advice_snapshot_hash"),
             "operator_user_id": details.get("operator_user_id") or log.actor_user_id,
             "operator_role": details.get("operator_role"),
             "operator_name": operator_name,

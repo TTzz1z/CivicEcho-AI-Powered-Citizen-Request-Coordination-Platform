@@ -134,8 +134,14 @@ class Settings(BaseSettings):
                 "production requires MALWARE_SCAN_MODE=http|clamd, MALWARE_SCAN_URL, "
                 "and MALWARE_SCAN_REQUIRE_CLEAN=true"
             )
-        if not self.object_storage_secure:
-            raise ValueError("OBJECT_STORAGE_SECURE must be true in production")
+        # Production requires reachable object storage credentials. In-cluster MinIO
+        # may use HTTP (OBJECT_STORAGE_SECURE=false); external HTTPS is terminated at Caddy.
+        if not (self.object_storage_endpoint or "").strip():
+            raise ValueError("OBJECT_STORAGE_ENDPOINT is required in production")
+        if not (self.object_storage_access_key or "").strip() or not (self.object_storage_secret_key or "").strip():
+            raise ValueError("object storage credentials are required in production")
+        if not (self.object_storage_bucket or "").strip() or not (self.kb_upload_bucket or "").strip():
+            raise ValueError("OBJECT_STORAGE_BUCKET and KB_UPLOAD_BUCKET are required in production")
         storage_values = f"{self.object_storage_access_key} {self.object_storage_secret_key}".lower()
         if any(marker in storage_values for marker in weak_markers):
             raise ValueError("object storage credentials are weak or still use a placeholder")

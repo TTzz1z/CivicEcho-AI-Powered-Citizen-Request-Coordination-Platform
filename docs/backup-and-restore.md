@@ -12,6 +12,14 @@
 
 **范围说明：`scripts/backup-database.ps1` 只备份 PostgreSQL（含工单、知识库元数据与向量），不包含 MinIO 对象存储中的附件与原文文件。附件灾备需另行备份 MinIO bucket / volume。**
 
+## MinIO 备份与恢复顺序
+
+1. **先停写**：暂停 Backend/Worker（或进入只读维护），避免备份窗口内新对象写入。
+2. **PostgreSQL**：执行 `backup-database.ps1`（或 `pg_dump -Fc`）。
+3. **MinIO buckets**：备份 `tingting-attachments` 与 `tingting-kb`（`mc mirror` / volume snapshot）。
+4. **恢复顺序**：先恢复 PostgreSQL 并确认 `alembic current`，再恢复 MinIO buckets；最后启动 Backend 做附件下载与 KB 原文抽检。
+5. **校验**：抽检 ticket attachment 下载、KB `storage_key` 对象存在、市民/部门关键路径。
+
 ## 恢复
 
 ```powershell

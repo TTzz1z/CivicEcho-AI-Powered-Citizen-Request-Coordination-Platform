@@ -102,7 +102,8 @@ class PostgreSQLTicketRepository(TicketRepository):
         statement = filtered.order_by(order, TicketModel.id.desc()).offset((query.page - 1) * query.page_size).limit(query.page_size)
         return PageResult(list(self.db.scalars(statement).all()), total)
 
-    def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates, visibility="internal"):
+    def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates,
+                   visibility="internal", *, commit: bool = True):
         ticket = self.get(ticket_id)
         if not ticket:
             return None
@@ -122,7 +123,10 @@ class PostgreSQLTicketRepository(TicketRepository):
             operation_type=operation_type, content=content, previous_status=previous,
             current_status=status, remark=content, visibility=visibility,
         ))
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return self.get(ticket_id)
 
     def feedback_transition(self, ticket_id, expected_version, status, content, operator_user_id,

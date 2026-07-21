@@ -89,4 +89,77 @@ describe('ChatPage', () => {
     expect(screen.queryByText(/请前往.“我的工单”.查看后续办理进度/)).not.toBeInTheDocument()
     expect(screen.getByText(/智能编排暂时不可用|orchestrator_unavailable|当前回答已降级/)).toBeInTheDocument()
   })
+
+  it('sanitizes rasa fallback that invents Incident IDs without QT ticket', async () => {
+    const { sanitizeRasaFallbackText } = await import('./ChatPage')
+    const text = sanitizeRasaFallbackText('Incident INC0012345 has been created. 请前往“我的工单”查看后续办理进度。')
+    expect(text).toMatch(/系统没有创建真实工单/)
+    expect(text).not.toMatch(/INC0012345/)
+  })
+
+  it('keeps rasa text that already contains a real QT id', async () => {
+    const { sanitizeRasaFallbackText } = await import('./ChatPage')
+    const text = sanitizeRasaFallbackText('工单已创建，编号：QT2026072200000099。')
+    expect(text).toContain('QT2026072200000099')
+  })
+
+  it('bind alert shows success / empty / failed three states', async () => {
+    const { BindStatusAlert } = await import('./ChatPage')
+    const { renderApp: render } = await import('../test/render')
+    const retry = vi.fn()
+
+    const { unmount: u1 } = render(
+      <MemoryRouter>
+        <BindStatusAlert isCitizen hasUser bindState="success" boundCount={2} onRetry={retry} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('bind-success')).toBeInTheDocument()
+    expect(screen.getByText(/已关联 2 条/)).toBeInTheDocument()
+    u1()
+
+    const { unmount: u2 } = render(
+      <MemoryRouter>
+        <BindStatusAlert isCitizen hasUser bindState="empty" boundCount={0} onRetry={retry} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('bind-empty')).toBeInTheDocument()
+    expect(screen.queryByText(/已绑定市民账号/)).not.toBeInTheDocument()
+    u2()
+
+    render(
+      <MemoryRouter>
+        <BindStatusAlert isCitizen hasUser bindState="failed" boundCount={null} onRetry={retry} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('bind-failed')).toBeInTheDocument()
+    expect(screen.queryByTestId('bind-success')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '重试绑定' }))
+    expect(retry).toHaveBeenCalled()
+  })
+
+  it('renders policy citations and hides them on no_evidence', async () => {
+    const { RouteMessage } = await import('./ChatPage')
+    const { renderApp: render } = await import('../test/render')
+    const withCite = {
+      id: '1', side: 'bot' as const, text: '根据政策…', route: 'policy_rag',
+      payload: {
+        no_evidence: false,
+        citations: [{
+          index: 1, doc_id: 3, title: '补贴办法', doc_number: '民发〔2024〕2号',
+          issuing_authority: '民政局', excerpt: '符合条件可申请补贴。', is_expired: false,
+        }],
+      },
+    }
+    const { unmount } = render(<MemoryRouter><RouteMessage item={withCite} /></MemoryRouter>)
+    expect(await screen.findByTestId('policy-citations')).toBeInTheDocument()
+    expect(screen.getByText('补贴办法')).toBeInTheDocument()
+    unmount()
+
+    render(<MemoryRouter><RouteMessage item={{
+      ...withCite,
+      payload: { no_evidence: true, citations: withCite.payload.citations },
+    }} /></MemoryRouter>)
+    expect(screen.getByTestId('no-evidence-banner')).toBeInTheDocument()
+    expect(screen.queryByTestId('policy-citations')).not.toBeInTheDocument()
+  })
 })

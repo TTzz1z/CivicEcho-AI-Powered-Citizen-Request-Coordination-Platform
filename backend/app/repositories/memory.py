@@ -84,7 +84,9 @@ class InMemoryTicketRepository(TicketRepository):
         start = (query.page - 1) * query.page_size
         return PageResult(items[start:start + query.page_size], total)
 
-    def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates, visibility="internal"):
+    def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates,
+                   visibility="internal", *, commit: bool = True):
+        del commit  # in-memory repo has no transactional boundary
         with self._lock:
             ticket = self.get(ticket_id)
             if not ticket or ticket.version != expected_version:

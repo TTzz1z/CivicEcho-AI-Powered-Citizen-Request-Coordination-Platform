@@ -165,7 +165,7 @@ def test_illegal_reject_return_and_version_conflict(identities):
         "version": 1, "remark": "非法跳转", "resolution_summary": "暂无",
         "resolution_measures": "暂无", "resolution_outcome": "unresolved", "public_reply": "无处理结果",
     }, headers=auth(admin))
-    assert illegal.status_code == 409 and illegal.json()["error"]["code"] == "INVALID_STATUS_TRANSITION"
+    assert illegal.status_code == 404
     assert client.post(f"/api/v1/tickets/{ticket_id}/accept", json={"version": 1, "remark": "受理"}, headers=auth(agent)).status_code == 200
     stale = client.post(f"/api/v1/tickets/{ticket_id}/assign", json={"version": 1, "remark": "旧版本", "department_id": staff["department_id"]}, headers=auth(agent))
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "VERSION_CONFLICT"
@@ -175,8 +175,8 @@ def test_illegal_reject_return_and_version_conflict(identities):
         "version": 4, "remark": "解决", "resolution_summary": "完成处理",
         "resolution_measures": "现场处理", "resolution_outcome": "resolved", "public_reply": "问题已处理",
     }
-    # P0-A: department staff cannot /resolve anymore; must submit work order, then summary + review-resolve.
-    assert client.post(f"/api/v1/tickets/{ticket_id}/resolve", json=resolve_payload, headers=auth(staff)).status_code == 403
+    # Legacy /resolve HTTP entry is removed; formal resolve is review-resolve only.
+    assert client.post(f"/api/v1/tickets/{ticket_id}/resolve", json=resolve_payload, headers=auth(staff)).status_code == 404
     detail_before = client.get(f"/api/v1/tickets/{ticket_id}", headers=auth(staff)).json()["data"]
     primary = next(item for item in detail_before["work_orders"] if item["task_type"] == "primary")
     assert client.post(f"/api/v1/tickets/{ticket_id}/work-orders/{primary['id']}/submit", json={
@@ -192,8 +192,8 @@ def test_illegal_reject_return_and_version_conflict(identities):
     # P0-B: dissatisfied feedback no longer reopens; status stays resolved.
     returned = client.post(f"/api/v1/tickets/{ticket_id}/feedback", json={"version": resolved.json()["data"]["version"], "rating": "dissatisfied", "comment": "现场问题仍然存在"}, headers=auth(citizen))
     assert returned.status_code == 200 and returned.json()["data"]["status"] == "resolved"
-    # P0-A: staff still cannot /resolve (and ticket is already resolved).
-    assert client.post(f"/api/v1/tickets/{ticket_id}/resolve", json=resolve_payload | {"version": returned.json()["data"]["version"], "public_reply": "已进行第二次处理"}, headers=auth(staff)).status_code == 403
+    # Legacy /resolve remains absent after formal resolve.
+    assert client.post(f"/api/v1/tickets/{ticket_id}/resolve", json=resolve_payload | {"version": returned.json()["data"]["version"], "public_reply": "已进行第二次处理"}, headers=auth(staff)).status_code == 404
     override = client.post(f"/api/v1/tickets/{ticket_id}/close", json={
         "version": returned.json()["data"]["version"], "remark": "依据回访记录代办结", "override_reason": "已完成处理且电话回访确认",
     }, headers=auth(admin))

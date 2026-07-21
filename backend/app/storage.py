@@ -43,14 +43,33 @@ class MinioObjectStorage:
         self._client.remove_object(self.bucket, object_key)
 
 
-@lru_cache
-def get_object_storage() -> MinioObjectStorage:
+def _build_minio_storage(bucket: str) -> MinioObjectStorage:
     settings = get_settings()
     return MinioObjectStorage(
         settings.object_storage_endpoint,
         settings.object_storage_access_key,
         settings.object_storage_secret_key,
-        settings.object_storage_bucket,
+        bucket,
         settings.object_storage_secure,
         settings.object_storage_region,
     )
+
+
+@lru_cache
+def get_object_storage() -> MinioObjectStorage:
+    """Attachment bucket storage (default OBJECT_STORAGE_BUCKET)."""
+    settings = get_settings()
+    return _build_minio_storage(settings.object_storage_bucket)
+
+
+@lru_cache
+def get_kb_object_storage() -> MinioObjectStorage:
+    """Knowledge-base upload bucket (KB_UPLOAD_BUCKET). Shares MinIO credentials."""
+    settings = get_settings()
+    return _build_minio_storage(settings.kb_upload_bucket)
+
+
+def reset_object_storage_for_tests() -> None:
+    """Clear cached MinIO clients. For tests only."""
+    get_object_storage.cache_clear()
+    get_kb_object_storage.cache_clear()

@@ -233,7 +233,7 @@ function KbRagResultCard({
                     <Tag color="blue">来源{c.index}</Tag>
                     <Typography.Text strong>{c.title}</Typography.Text>
                     {c.doc_number && <Typography.Text type="secondary">{c.doc_number}</Typography.Text>}
-                    {c.department && <Tag>{c.department}</Tag>}
+                    {(c.issuing_authority || c.department) && <Tag>{c.issuing_authority || c.department}</Tag>}
                     {c.is_expired ? (
                       <Tag color="red">已失效</Tag>
                     ) : (
@@ -290,6 +290,7 @@ function KbRagResultCard({
 }
 
 function CitationDetail({ citation }: { citation: KbCitation }) {
+  const authority = citation.issuing_authority || citation.department
   return (
     <div>
       {citation.excerpt && (
@@ -306,6 +307,8 @@ function CitationDetail({ citation }: { citation: KbCitation }) {
         </Typography.Paragraph>
       )}
       <Space wrap>
+        {authority && <Tag>发布单位：{authority}</Tag>}
+        {citation.doc_number && <Tag>文号：{citation.doc_number}</Tag>}
         {citation.published_at && <Tag>发布：{citation.published_at.slice(0, 10)}</Tag>}
         {citation.effective_at && <Tag>生效：{citation.effective_at.slice(0, 10)}</Tag>}
         {citation.expires_at && <Tag color={citation.is_expired ? 'red' : 'default'}>

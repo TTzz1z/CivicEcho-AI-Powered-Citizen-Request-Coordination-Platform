@@ -75,7 +75,8 @@ services:
     environment:
       APP_ENV: "production"
       CORS_ORIGINS: "${CORS_ORIGINS:?Set CORS_ORIGINS in .env.prod}"
-      OBJECT_STORAGE_SECURE: "true"
+      # In-cluster MinIO stays HTTP; external TLS terminates at Caddy.
+      OBJECT_STORAGE_SECURE: "false"
       MALWARE_SCAN_MODE: "clamd"
       MALWARE_SCAN_URL: "clamav:3310"
       MALWARE_SCAN_REQUIRE_CLEAN: "true"

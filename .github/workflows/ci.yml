@@ -4,6 +4,17 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      run_e2e_full:
+        description: "Run full three-browser Playwright suite"
+        type: boolean
+        default: true
+      run_production_compose:
+        description: "Run production-compose integration job"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -113,6 +124,25 @@ jobs:
         run: npx playwright install --with-deps chromium
       - run: sh scripts/run-e2e.sh smoke
 
+  e2e-full:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.run_e2e_full == true)
+      || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npx playwright install --with-deps
+      - run: sh scripts/run-e2e.sh full
+
   dependency-security:
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +166,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   docker-integration:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,3 +175,61 @@ jobs:
       - run: docker compose exec -T -e SEED_PASSWORD backend python -m scripts.verify_r4_business_loops
       - if: always()
         run: docker compose logs --no-color --tail=200 && docker compose down -v
+
+  production-compose:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_dispatch' && inputs.run_production_compose == true)
+      || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write .env.prod for CI
+        run: |
+          cat > .env.prod <<'EOF'
+          JWT_SECRET=ci-prod-jwt-secret-at-least-32-characters-long
+          SERVICE_API_TOKEN=ci-prod-service-token-at-least-32-chars
+          POSTGRES_PASSWORD=CiProdPgSecret9f3a2b7c1d4e5f60
+          APP_ENV=production
+          SITE_ADDRESS=localhost
+          CORS_ORIGINS=https://localhost
+          RASA_CORS_ORIGIN=https://localhost
+          POSTGRES_DB=tingting
+          POSTGRES_USER=tingting
+          MINIO_ROOT_USER=ciProdMinioUser
+          MINIO_ROOT_PASSWORD=CiProdMinioSecret9f3a2b7c1d4e
+          OBJECT_STORAGE_ENDPOINT=minio:9000
+          OBJECT_STORAGE_ACCESS_KEY=ciProdMinioUser
+          OBJECT_STORAGE_SECRET_KEY=CiProdMinioSecret9f3a2b7c1d4e
+          OBJECT_STORAGE_BUCKET=tingting-attachments
+          KB_UPLOAD_BUCKET=tingting-kb
+          OBJECT_STORAGE_SECURE=false
+          MALWARE_SCAN_MODE=clamd
+          MALWARE_SCAN_URL=clamav:3310
+          MALWARE_SCAN_REQUIRE_CLEAN=true
+          SEED_PASSWORD=CI-Seed-Only-From-Workflow-2026!
+          EOF
+      - name: Validate production compose
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod config -q
+      - name: Start production compose
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build --wait
+      - name: Alembic head and health
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend alembic current
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"
+      - name: Seed demo profile
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T -e SEED_PASSWORD -e SEED_PROFILE=demo backend python -m app.seed
+      - name: Verify ClamAV scanner rejects EICAR
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python - <<'PY'
+          from datetime import datetime, timezone
+          from io import BytesIO
+          from app.malware_scanner import get_malware_scanner
+          eicar = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+          result = get_malware_scanner().scan(BytesIO(eicar), "eicar.txt", "text/plain")
+          print({"status": result.status, "detail": result.detail, "engine": result.engine, "scanned_at": result.scanned_at.isoformat() if isinstance(result.scanned_at, datetime) else result.scanned_at})
+          assert result.status == "infected", result
+          PY
+      - if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs --no-color --tail=200 && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod down -v

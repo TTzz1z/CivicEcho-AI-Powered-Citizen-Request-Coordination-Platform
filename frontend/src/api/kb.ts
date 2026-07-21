@@ -134,6 +134,8 @@ export async function runKbEval(scenario?: string, role = 'citizen'): Promise<Kb
 export type KbAdviceReviewDecision = 'adopted' | 'adopted_with_edits' | 'rejected'
 
 export interface KbAdviceReviewRequest {
+  /** Required evidence-chain id from ticket_advice response. */
+  advice_id: string
   decision: KbAdviceReviewDecision
   edit_summary?: string
   advice_snapshot?: Record<string, unknown>
@@ -145,6 +147,8 @@ export interface KbAdviceReviewRecord {
   decision: KbAdviceReviewDecision
   edit_summary: string | null
   advice_snapshot: Record<string, unknown> | null
+  advice_id?: string | null
+  suggestion_version?: number | string | null
   operator_user_id: number | null
   operator_role: string | null
   operator_name: string | null
@@ -154,6 +158,7 @@ export interface KbAdviceReviewRecord {
 
 export interface KbAdviceReviewResult {
   ticket_id: string
+  advice_id?: string | null
   decision: KbAdviceReviewDecision
   edit_summary: string | null
   operator_user_id: number | null

@@ -78,11 +78,17 @@ export function AiCaseAssistant({ ticket }: Props) {
   })
 
   const reviewMutation = useMutation({
-    mutationFn: (decision: KbAdviceReviewDecision) => reviewKbTicketAdvice(ticket.ticket_id, {
-      decision,
-      edit_summary: editSummary.trim() || undefined,
-      advice_snapshot: advice ? { ...advice } : undefined,
-    }),
+    mutationFn: (decision: KbAdviceReviewDecision) => {
+      if (!advice?.advice_id) {
+        return Promise.reject(new Error('缺少 advice_id，请重新生成建议后再审核'))
+      }
+      return reviewKbTicketAdvice(ticket.ticket_id, {
+        advice_id: advice.advice_id,
+        decision,
+        edit_summary: editSummary.trim() || undefined,
+        advice_snapshot: advice ? { ...advice } : undefined,
+      })
+    },
     onSuccess: () => {
       message.success('审核已记录，工单状态未变更')
       setHasReviewed(true)
@@ -93,7 +99,7 @@ export function AiCaseAssistant({ ticket }: Props) {
         queryKey: ['kb', 'tickets', ticket.ticket_id, 'advice-reviews'],
       })
     },
-    onError: e => message.error(e instanceof ApiError ? e.message : '审核提交失败'),
+    onError: e => message.error(e instanceof ApiError ? e.message : (e instanceof Error ? e.message : '审核提交失败')),
   })
 
   const regenerate = () => {
@@ -114,6 +120,10 @@ export function AiCaseAssistant({ ticket }: Props) {
 
   const submitReview = () => {
     if (!pendingDecision) return
+    if (!advice?.advice_id) {
+      message.error('缺少 advice_id，请重新生成建议后再审核')
+      return
+    }
     if (pendingDecision === 'adopted_with_edits' && !editSummary.trim()) {
       message.warning('请填写修改内容摘要')
       return
@@ -193,6 +203,17 @@ export function AiCaseAssistant({ ticket }: Props) {
             />
           )}
 
+          <Space wrap style={{ marginBottom: 12 }}>
+            {advice.advice_id && (
+              <Typography.Text type="secondary" data-testid="advice-id">
+                建议 ID：<Typography.Text copyable={{ text: advice.advice_id }} code>{advice.advice_id}</Typography.Text>
+              </Typography.Text>
+            )}
+            {advice.suggestion_version != null && advice.suggestion_version !== '' && (
+              <Tag data-testid="advice-suggestion-version">建议版本：{String(advice.suggestion_version)}</Tag>
+            )}
+          </Space>
+
           <Collapse
             defaultActiveKey={['policies', 'steps', 'reply']}
             items={[
@@ -261,8 +282,10 @@ export function AiCaseAssistant({ ticket }: Props) {
               },
               {
                 key: 'citations',
-                label: `引用来源 (${advice.citations.length})`,
-                children: advice.citations.length ? (
+                label: `引用来源 (${advice.no_evidence ? 0 : advice.citations.length})`,
+                children: advice.no_evidence || !advice.citations.length ? (
+                  <Empty description={advice.no_evidence ? '无证据，不展示引用来源' : '无引用（基于规则生成）'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                ) : (
                   <Collapse
                     size="small"
                     items={advice.citations.map(c => ({
@@ -272,14 +295,14 @@ export function AiCaseAssistant({ ticket }: Props) {
                           <Tag color="blue">来源{c.index}</Tag>
                           <Typography.Text strong>{c.title}</Typography.Text>
                           {c.doc_number && <Typography.Text type="secondary">{c.doc_number}</Typography.Text>}
-                          {c.department && <Tag>{c.department}</Tag>}
+                          {(c.issuing_authority || c.department) && <Tag>{c.issuing_authority || c.department}</Tag>}
                           {c.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag>}
                         </Space>
                       ),
                       children: <CitationDetail citation={c} />,
                     }))}
                   />
-                ) : <Empty description="无引用（基于规则生成）" image={Empty.PRESENTED_IMAGE_SIMPLE} />,
+                ),
               },
             ]}
           />
@@ -331,20 +354,30 @@ export function AiCaseAssistant({ ticket }: Props) {
             </div>
 
             {reviews.length > 0 && (
-              <Card size="small" title="审核历史" style={{ marginTop: 16 }}>
+              <Card size="small" title="审核历史" style={{ marginTop: 16 }} data-testid="advice-review-history">
                 <Timeline
                   items={reviews.map(r => ({
                     color: DECISION_TAG_COLOR[r.decision],
                     children: (
-                      <div>
+                      <div data-testid={`advice-review-${r.id}`}>
                         <Space wrap>
                           <Tag color={DECISION_TAG_COLOR[r.decision]}>{DECISION_LABEL[r.decision]}</Tag>
-                          <Typography.Text strong>{r.operator_name ?? '未知用户'}</Typography.Text>
+                          <Typography.Text strong data-testid="review-operator">{r.operator_name ?? '未知用户'}</Typography.Text>
                           {r.operator_role && (
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                               {roleLabel(r.operator_role)}
                             </Typography.Text>
                           )}
+                          {(r.advice_id || snapshotAdviceId(r.advice_snapshot)) && (
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="review-advice-id">
+                              建议 ID：{r.advice_id || snapshotAdviceId(r.advice_snapshot)}
+                            </Typography.Text>
+                          )}
+                          {(r.suggestion_version != null && r.suggestion_version !== '') || snapshotSuggestionVersion(r.advice_snapshot) != null ? (
+                            <Tag data-testid="review-suggestion-version">
+                              建议版本：{String(r.suggestion_version ?? snapshotSuggestionVersion(r.advice_snapshot))}
+                            </Tag>
+                          ) : null}
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             {formatDateTime(r.operated_at)}
                           </Typography.Text>
@@ -404,7 +437,21 @@ function roleLabel(role: string): string {
   return map[role] || role
 }
 
+function snapshotAdviceId(snapshot: Record<string, unknown> | null | undefined): string | null {
+  if (!snapshot) return null
+  const id = snapshot.advice_id
+  return typeof id === 'string' && id ? id : null
+}
+
+function snapshotSuggestionVersion(snapshot: Record<string, unknown> | null | undefined): string | number | null {
+  if (!snapshot) return null
+  const v = snapshot.suggestion_version
+  if (typeof v === 'string' || typeof v === 'number') return v
+  return null
+}
+
 function CitationDetail({ citation }: { citation: KbCitation }) {
+  const authority = citation.issuing_authority || citation.department
   return (
     <div>
       {citation.excerpt && (
@@ -421,6 +468,8 @@ function CitationDetail({ citation }: { citation: KbCitation }) {
         </Typography.Paragraph>
       )}
       <Space wrap>
+        {authority && <Tag>发布单位：{authority}</Tag>}
+        {citation.doc_number && <Tag>文号：{citation.doc_number}</Tag>}
         {citation.published_at && <Tag>发布：{citation.published_at.slice(0, 10)}</Tag>}
         {citation.effective_at && <Tag>生效：{citation.effective_at.slice(0, 10)}</Tag>}
         {citation.expires_at && (

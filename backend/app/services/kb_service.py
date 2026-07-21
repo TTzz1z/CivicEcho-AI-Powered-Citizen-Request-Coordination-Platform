@@ -25,6 +25,7 @@ from ..errors import BusinessError, PermissionDenied
 from ..llm_client import get_llm_client
 from ..logging_config import request_id_context
 from ..models import (
+    AiSuggestionModel,
     KbChunkModel,
     KbDocumentModel,
     KbEvalCaseModel,
@@ -33,7 +34,9 @@ from ..models import (
     KbNoAnswerQuestionModel,
 )
 from ..repositories.identity import AuditRepository
-from ..storage import get_object_storage
+from ..storage import get_kb_object_storage
+from ..malware_scanner import get_malware_scanner
+from .attachment_service import AttachmentService
 from .ai_usage_recorder import (
     AiUsageRecorder,
     make_context,
@@ -156,6 +159,14 @@ VISIBILITIES = {"PUBLIC", "DEPARTMENT", "INTERNAL"}
 DOC_STATUSES = {"DRAFT", "REVIEWING", "PUBLISHED", "REJECTED", "WITHDRAWN", "EXPIRED", "PARSE_FAILED"}
 INDEX_STATUSES = {"pending", "building", "ready", "failed"}
 ALLOWED_FILE_EXTS = {"pdf", "docx", "md", "markdown", "txt", "text"}
+KB_MIME_BY_EXT = {
+    "pdf": {"application/pdf"},
+    "docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    "md": {"text/markdown", "text/plain", "application/octet-stream"},
+    "markdown": {"text/markdown", "text/plain", "application/octet-stream"},
+    "txt": {"text/plain", "application/octet-stream"},
+    "text": {"text/plain", "application/octet-stream"},
+}
 
 
 def _derive_embedding_provider(base_url: str) -> str:
@@ -245,11 +256,14 @@ class KnowledgeBaseService:
         self.db.commit()
         self.db.refresh(doc)
 
-        if raw_content:
+        # auto_publish indexes inside _publish_internal; avoid double indexing.
+        will_auto_publish = (
+            auto_publish and principal.role == "admin" and self.settings.kb_allow_direct_publish
+        )
+        if raw_content and not will_auto_publish:
             self._parse_and_index(doc, principal)
 
-        # First version may be directly published if admin and auto_publish
-        if auto_publish and principal.role == "admin" and self.settings.kb_allow_direct_publish:
+        if will_auto_publish:
             self._publish_internal(doc, principal, comment="管理员直接发布")
         self.audit.log(principal, "kb_doc_create",
                        resource_type="kb_document", resource_id=str(doc.id),
@@ -269,8 +283,8 @@ class KnowledgeBaseService:
         """Upload a file (PDF/Word/MD/TXT) and create or replace a document."""
         if principal.role not in {"department_staff", "admin"}:
             raise PermissionDenied("只有部门人员和管理员可以上传文档")
-        # Validate extension
-        ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+        safe_name = AttachmentService._safe_filename(filename)
+        ext = (safe_name.rsplit(".", 1)[-1] if "." in safe_name else "").lower()
         if ext not in ALLOWED_FILE_EXTS:
             raise BusinessError("INVALID_FILE_TYPE",
                                 f"仅支持 {','.join(sorted(ALLOWED_FILE_EXTS))} 类型", 422)
@@ -280,8 +294,35 @@ class KnowledgeBaseService:
         if size > self.settings.attachment_max_bytes:
             raise BusinessError("FILE_TOO_LARGE", "文件超过大小限制", 413)
 
-        # Parse content first
-        parsed = parse_bytes(file_bytes, filename, mime_type)
+        normalized_mime = (mime_type or "").split(";", 1)[0].strip().lower()
+        allowed_mimes = KB_MIME_BY_EXT.get(ext, set())
+        if normalized_mime and normalized_mime not in allowed_mimes:
+            # Allow empty/unknown mime for txt/md when clients omit Content-Type.
+            if not (ext in {"txt", "text", "md", "markdown"} and not normalized_mime):
+                raise BusinessError("INVALID_CONTENT_TYPE", "文件扩展名与内容类型不匹配", 415)
+        if not normalized_mime:
+            normalized_mime = next(iter(allowed_mimes)) if allowed_mimes else "application/octet-stream"
+
+        prefix = file_bytes[:512]
+        if ext in {"pdf", "docx"} and not AttachmentService._signature_matches(ext, prefix):
+            raise BusinessError("ATTACHMENT_SIGNATURE_MISMATCH", "文件实际内容与扩展名不匹配", 415)
+        if ext == "docx":
+            import io
+            if not AttachmentService._validate_ooxml("docx", io.BytesIO(file_bytes)):
+                raise BusinessError("ATTACHMENT_SIGNATURE_MISMATCH", "Office 附件结构无效或解压规模超限", 415)
+
+        # Scan before parse / MinIO. Infected → 422; scanner error + require_clean → 503.
+        import io as _io
+        scan = get_malware_scanner().scan(_io.BytesIO(file_bytes), safe_name, normalized_mime)
+        if scan.status == "infected":
+            raise BusinessError("MALWARE_DETECTED", "文件未通过安全扫描", 422)
+        if scan.status == "error" or (self.settings.malware_scan_require_clean and scan.status != "clean"):
+            raise BusinessError("MALWARE_SCAN_UNAVAILABLE", "文件安全扫描暂时不可用", 503)
+
+        # Parse content only after security checks pass.
+        parsed = parse_bytes(file_bytes, safe_name, normalized_mime)
+        filename = safe_name
+        mime_type = normalized_mime
         file_type_map = {"pdf": "pdf", "docx": "word", "md": "markdown", "markdown": "markdown", "txt": "text", "text": "text"}
         file_type = file_type_map.get(ext, "text")
         title = (title or filename.rsplit(".", 1)[0]).strip()
@@ -388,29 +429,16 @@ class KnowledgeBaseService:
         return new_doc
 
     def _store_file(self, doc: KbDocumentModel, file_bytes: bytes, filename: str) -> str:
-        """Store file in MinIO under KB bucket. Returns object key."""
-        settings = self.settings
-        # Use a dedicated KB bucket; create on demand
+        """Store file in MinIO under KB bucket via shared storage adapter. Returns object key."""
+        import io
+        object_key = f"docs/{doc.id}/{uuid.uuid4().hex}_{filename}"
         try:
-            from minio import Minio
-            client = Minio(
-                settings.object_storage_endpoint.removeprefix("https://").removeprefix("http://"),
-                access_key=settings.object_storage_access_key,
-                secret_key=settings.object_storage_secret_key,
-                secure=settings.object_storage_secure,
-                region=settings.object_storage_region,
-            )
-            bucket = settings.kb_upload_bucket
-            if not client.bucket_exists(bucket):
-                client.make_bucket(bucket, location=settings.object_storage_region)
-            object_key = f"docs/{doc.id}/{uuid.uuid4().hex}_{filename}"
-            import io
-            client.put_object(bucket, object_key, io.BytesIO(file_bytes), len(file_bytes),
-                              content_type="application/octet-stream")
+            storage = get_kb_object_storage()
+            storage.put(object_key, io.BytesIO(file_bytes), len(file_bytes), "application/octet-stream")
             return object_key
         except Exception as exc:
             logger.warning("KB file storage failed: %s", exc)
-            return ""
+            raise BusinessError("KB_STORAGE_UNAVAILABLE", "知识库文件存储暂时不可用", 503) from exc
 
     def download_file(self, doc_id: int, principal: Principal) -> tuple[bytes, str, Optional[str]]:
         """Return (bytes, filename, mime_type) for download. Permission-checked."""
@@ -419,25 +447,23 @@ class KnowledgeBaseService:
         if not doc.storage_key:
             raise BusinessError("NO_FILE", "该文档没有可下载的源文件", 404)
         try:
-            from minio import Minio
-            settings = self.settings
-            client = Minio(
-                settings.object_storage_endpoint.removeprefix("https://").removeprefix("http://"),
-                access_key=settings.object_storage_access_key,
-                secret_key=settings.object_storage_secret_key,
-                secure=settings.object_storage_secure,
-                region=settings.object_storage_region,
-            )
-            response = client.get_object(settings.kb_upload_bucket, doc.storage_key)
+            storage = get_kb_object_storage()
+            response = storage.open(doc.storage_key)
             try:
                 data = response.read()
             finally:
-                response.close()
-                response.release_conn()
+                close = getattr(response, "close", None)
+                release = getattr(response, "release_conn", None)
+                if callable(close):
+                    close()
+                if callable(release):
+                    release()
             return data, doc.original_filename or "document", doc.mime_type
+        except BusinessError:
+            raise
         except Exception as exc:
             logger.warning("KB file download failed: %s", exc)
-            raise BusinessError("DOWNLOAD_FAILED", "文件下载失败", 500)
+            raise BusinessError("DOWNLOAD_FAILED", "文件下载失败", 500) from exc
 
     # ====================================================================
     # Lifecycle: review, publish, withdraw, expire
@@ -517,20 +543,31 @@ class KnowledgeBaseService:
                        resource_type="kb_document", resource_id=str(doc.id), details={"comment": comment})
 
     def _publish_internal(self, doc: KbDocumentModel, principal: Principal, comment: str = ""):
-        """Publish document and trigger indexing."""
+        """Index first; only mark PUBLISHED (and withdraw old) after index_status=ready."""
+        replaces_id = doc.replaces_doc_id
+        self._parse_and_index(doc, principal)
+        doc = self.db.get(KbDocumentModel, doc.id)
+        if not doc or doc.index_status != "ready":
+            # Keep DRAFT/REVIEWING (or prior non-published status); old published stays live.
+            raise BusinessError(
+                "INDEX_FAILED",
+                "索引未就绪，无法发布；旧版仍保持可检索",
+                409,
+                {"index_status": getattr(doc, "index_status", None)},
+            )
+        now = datetime.now(timezone.utc)
         doc.status = "PUBLISHED"
-        doc.published_at = datetime.now(timezone.utc)
+        doc.published_at = now
         doc.published_by_user_id = principal.user_id
         doc.review_comment = comment
         if not doc.effective_at:
             doc.effective_at = doc.published_at
-        # If this doc replaces another, mark the old one as WITHDRAWN/EXPIRED
-        if doc.replaces_doc_id:
-            old = self.db.get(KbDocumentModel, doc.replaces_doc_id)
+        # Withdraw replaced document only after new version is PUBLISHED + ready.
+        if replaces_id:
+            old = self.db.get(KbDocumentModel, replaces_id)
             if old and old.status == "PUBLISHED":
                 old.status = "WITHDRAWN"
-        # Trigger parse + index
-        self._parse_and_index(doc, principal)
+        self.db.flush()
 
     def withdraw_document(self, doc_id: int, principal: Principal, reason: str = ""):
         doc = self._get_doc(doc_id)
@@ -565,6 +602,15 @@ class KnowledgeBaseService:
         is fully built. Failure marks index_status=failed, deletes only the staging
         batch, and leaves the previous live batch intact.
         """
+        doc_id = doc.id
+        locked = self.db.scalar(
+            select(KbDocumentModel).where(KbDocumentModel.id == doc_id).with_for_update()
+        )
+        if not locked:
+            raise BusinessError("DOC_NOT_FOUND", "文档不存在", 404)
+        doc = locked
+        if doc.index_status == "building":
+            raise BusinessError("INDEX_IN_PROGRESS", "文档正在重建索引，请稍后重试", 409)
         if not doc.raw_content:
             doc.parse_status = "failed"
             doc.index_status = "failed"
@@ -636,7 +682,13 @@ class KnowledgeBaseService:
                 )
                 self.db.add(chunk)
                 self.db.flush()
-                if embed_result.success and embed_result.vector:
+                # Never write hash / fallback vectors into pgvector; keyword-only for those chunks.
+                if (
+                    fallback_status == "none"
+                    and embed_result.success
+                    and embed_result.vector
+                    and not embed_result.fallback
+                ):
                     self._store_embedding(chunk.id, embed_result.vector)
 
             # Atomic switch: activate staging, then drop previous live batches.
@@ -1014,13 +1066,22 @@ class KnowledgeBaseService:
         if not doc_ids:
             return []
         vec_str = "[" + ",".join(f"{v:.8f}" for v in query_vec) + "]"
-        # Join documents so only active_index_batch chunks are recalled.
+        expected_model = self.settings.embedding_model
+        expected_dim = int(self.settings.embedding_dimensions or 0)
+        # Only real (non-fallback) embeddings with matching generation metadata.
         sql = text("""
             SELECT c.id, 1 - (c.embedding <=> CAST(:vec AS vector)) AS score
             FROM kb_chunks c
             JOIN kb_documents d ON d.id = c.document_id
             WHERE c.document_id = ANY(:doc_ids)
               AND c.embedding IS NOT NULL
+              AND c.embedding_fallback = 'none'
+              AND (
+                :expected_model = '' OR c.embedding_model IS NULL OR c.embedding_model = :expected_model
+              )
+              AND (
+                :expected_dim = 0 OR c.embedding_dimension IS NULL OR c.embedding_dimension = :expected_dim
+              )
               AND (
                 (d.active_index_batch IS NOT NULL AND c.index_batch_id = d.active_index_batch)
                 OR (d.active_index_batch IS NULL AND c.index_batch_id IS NULL)
@@ -1028,7 +1089,13 @@ class KnowledgeBaseService:
             ORDER BY c.embedding <=> CAST(:vec AS vector)
             LIMIT :k
         """)
-        rows = self.db.execute(sql, {"vec": vec_str, "doc_ids": doc_ids, "k": k}).all()
+        rows = self.db.execute(sql, {
+            "vec": vec_str,
+            "doc_ids": doc_ids,
+            "k": k,
+            "expected_model": expected_model or "",
+            "expected_dim": expected_dim,
+        }).all()
         return [(float(row.score), int(row.id)) for row in rows if row.score is not None]
 
     def _keyword_search(self, query: str, doc_ids: list[int], k: int) -> list[tuple[float, int]]:
@@ -1514,6 +1581,35 @@ class KnowledgeBaseService:
     # Department AI assistant for tickets
     # ====================================================================
 
+    def _persist_ticket_advice(
+        self, ticket, principal: Principal, advice: dict,
+    ) -> dict:
+        """Persist AI ticket advice as AiSuggestion and stamp advice_id."""
+        advice_id = str(uuid.uuid4())
+        fingerprint = hashlib.sha256(
+            f"{ticket.ticket_id}:ticket_advice:{advice.get('generated_at')}:{advice_id}".encode("utf-8")
+        ).hexdigest()
+        payload = dict(advice)
+        payload["advice_id"] = advice_id
+        item = AiSuggestionModel(
+            id=advice_id,
+            ticket_id=ticket.ticket_id,
+            suggestion_type="ticket_advice",
+            status="completed",
+            risk_level="none",
+            confidence=70 if not advice.get("no_evidence") else 40,
+            provider=str(advice.get("provider") or "rules")[:32],
+            model_name=str(advice.get("model") or "rules-v2")[:100],
+            input_fingerprint=fingerprint,
+            result_json=json.dumps(payload, ensure_ascii=False),
+            explanation="工单办件 AI 建议，仅供人工参考，不得自动办结。",
+            generated_by_user_id=principal.user_id,
+        )
+        self.db.add(item)
+        self.db.commit()
+        advice["advice_id"] = advice_id
+        return advice
+
     def ticket_advice(self, ticket, principal: Principal, *,
                       request_id: Optional[str] = None) -> dict:
         """RAG-powered department AI assistant for a work order ticket.
@@ -1571,7 +1667,7 @@ class KnowledgeBaseService:
                 model_name="rules",
                 degrade_reason="no_evidence",
             )
-            return {
+            return self._persist_ticket_advice(ticket, principal, {
                 "summary": description[:100] if description else "",
                 "suggested_category": category_name or "",
                 "suggested_department": "",
@@ -1589,7 +1685,9 @@ class KnowledgeBaseService:
                 "no_evidence": True,
                 "generated_at": generated_at,
                 "advisory_only": True,
-            }
+                "provider": "rules",
+                "model": "rules",
+            })
 
         # Generate structured advice via LLM
         llm = get_llm_client()
@@ -1659,7 +1757,7 @@ class KnowledgeBaseService:
                     advice["provider"] = llm.provider or "deepseek"
                     advice["model"] = llm.model
                     advice["advisory_only"] = True
-                    return advice
+                    return self._persist_ticket_advice(ticket, principal, advice)
                 except (json.JSONDecodeError, KeyError) as exc:
                     logger.warning("ticket advice JSON parse failed: %s", exc)
             else:
@@ -1674,7 +1772,7 @@ class KnowledgeBaseService:
             )
 
         # Fallback: rule-based advice with retrieved citations
-        return {
+        return self._persist_ticket_advice(ticket, principal, {
             "summary": description[:100] if description else "",
             "suggested_category": category_name or "",
             "suggested_department": "",
@@ -1714,7 +1812,7 @@ class KnowledgeBaseService:
             "provider": "rules",
             "model": "rules-v2",
             "advisory_only": True,
-        }
+        })
 
     # ====================================================================
     # Helpers

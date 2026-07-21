@@ -160,6 +160,45 @@ def _load_models():
     }
 
 
+def _cleanup_minio_demo_prefixes() -> None:
+    """Best-effort purge of demo/test object prefixes. Never fails the reset."""
+    try:
+        from app.storage import get_kb_object_storage, get_object_storage
+    except Exception as exc:  # pragma: no cover - optional soft path
+        print(f"  skip MinIO cleanup (import): {exc}")
+        return
+
+    prefixes = ("demo/", "e2e/", "test/", "docs/")
+    for label, factory in (
+        ("attachments", get_object_storage),
+        ("kb", get_kb_object_storage),
+    ):
+        try:
+            storage = factory()
+            client = getattr(storage, "_client", None)
+            bucket = getattr(storage, "bucket", None)
+            if client is None or not bucket:
+                print(f"  skip MinIO {label}: client unavailable")
+                continue
+            removed = 0
+            for prefix in prefixes:
+                try:
+                    for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+                        name = getattr(obj, "object_name", None)
+                        if not name:
+                            continue
+                        # Keep durable seeded KB objects under docs/<id>/; only wipe test-ish keys.
+                        if prefix == "docs/" and "/test-" not in name and "/e2e-" not in name and "/r2-" not in name:
+                            continue
+                        client.remove_object(bucket, name)
+                        removed += 1
+                except Exception as prefix_exc:
+                    print(f"  MinIO {label} prefix {prefix}: {prefix_exc}")
+            print(f"  MinIO {label}: removed {removed} demo/test objects")
+        except Exception as exc:
+            print(f"  skip MinIO {label} cleanup: {exc}")
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Deterministic demo DB reset + seed")
     parser.add_argument(
@@ -224,6 +263,9 @@ def main(argv: list[str] | None = None):
     ))
     db.commit()
     print(f"  deleted {total} test KB docs")
+
+    print("\n=== Step 5b: Optional MinIO demo-prefix cleanup ===")
+    _cleanup_minio_demo_prefixes()
 
     print("\n=== Step 6: Re-seed demo data ===")
     from app.seed import seed

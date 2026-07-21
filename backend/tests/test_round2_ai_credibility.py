@@ -271,13 +271,15 @@ def test_advice_review_does_not_change_ticket_status(actors):
     assert process_res.status_code == 200, process_res.text
     version_before = process_res.json()["data"]["version"]
 
-    # Generate advice and submit review.
-    client.post(f"/api/v1/ai/tickets/{ticket_id}/case-advice",
-                headers=headers(actors["staff"]))
+    # Generate advice and submit review with stable advice_id evidence chain.
+    advice_res = client.post(f"/api/v1/ai/tickets/{ticket_id}/case-advice",
+                             headers=headers(actors["staff"]))
+    assert advice_res.status_code == 200, advice_res.text
+    advice_id = advice_res.json()["data"]["advice_id"]
     review_res = client.post(
         f"/api/v1/kb/tickets/{ticket_id}/advice/review",
         headers=headers(actors["staff"]),
-        json={"decision": "adopted", "edit_summary": "采纳 AI 建议"},
+        json={"advice_id": advice_id, "decision": "adopted", "edit_summary": "采纳 AI 建议"},
     )
     assert review_res.status_code == 200, review_res.text
 
@@ -299,10 +301,12 @@ def test_advice_review_rejects_invalid_decision(actors):
     res = client.post(
         f"/api/v1/kb/tickets/{ticket_id}/advice/review",
         headers=headers(actors["staff"]),
-        json={"decision": "auto_dispatch"},
+        json={
+            "advice_id": "00000000-0000-0000-0000-000000000001",
+            "decision": "auto_dispatch",
+        },
     )
-    # BusinessError raises 400 for invalid decision (not 422, which is reserved
-    # for Pydantic schema validation). Either is acceptable as "rejected".
+    # Invalid decision → 400 BusinessError; missing/invalid schema → 422.
     assert res.status_code in {400, 422}, res.text
 
 

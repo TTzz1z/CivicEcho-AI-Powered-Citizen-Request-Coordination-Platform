@@ -1,32 +1,36 @@
-# 数据库设计
+# 数据库设计（v1.0.0）
 
-技术基线：PostgreSQL 16、SQLAlchemy 2.0、Alembic。`0001` 未修改；`0002_enterprise_ticket_workflow.py` 增量升级旧 volume。
+技术基线：PostgreSQL 16 + pgvector、SQLAlchemy 2.0、Alembic。当前 head = **0023**（`ai_suggestions` 增加 `ticket_advice` 类型与 `adopted|adopted_with_edits|rejected` 审核决策）。
 
 ## 核心表
 
-`departments` 保存 code、name、description、启停状态和带时区审计时间，migration 预置城市管理、交通运输、住房物业、教育服务、医疗卫生、社区民政、综合受理。
+| 表 | 用途 | 关键字段 / 约束 |
+|---|---|---|
+| `departments` | 部门主数据 | code、name、is_active |
+| `users` | 账号 | role ∈ citizen/agent/department_staff/admin；Argon2 password_hash |
+| `tickets` | 诉求主表 | `ticket_id` 唯一、`version` 乐观锁、`idempotency_key`、SLA 截止 |
+| `ticket_status_history` | 业务处理留痕 | operation_type、previous/current_status、visibility |
+| `work_orders` / `work_order_history` | 部门任务 | task_type、status、version；与父票同事务创建/启动 |
+| `kb_documents` | 知识库文档 | status、visibility、`active_index_batch`、`replaces_doc_id`、`issuing_authority` |
+| `kb_chunks` | 分块 + 向量 | `embedding`、`embedding_model`、`embedding_dimension`、`embedding_fallback`、`index_batch_id` |
+| `ai_suggestions` | AI 建议证据链 | `suggestion_type` 含 `ticket_advice`；`review_decision` 三态 |
+| `ai_usage_logs` | AI 用量审计 | capability、provider、model、tokens、degrade_reason |
+| `audit_logs` | 业务审计 | actor、action、resource、details（含 advice_id/snapshot_hash） |
+| `ticket_attachments` | 附件元数据 | MinIO object key；上传前 ClamAV/魔数校验 |
 
-`users` 保存 username、Argon2 password_hash、display_name、固定 role、可选 department_id、启停状态和时间。数据库约束 role 只能是 citizen、agent、department_staff、admin。
+## 发布与索引
 
-`tickets` 在 `0001` 字段上增加：
-
-- creator_user_id、anonymous_creator_key
-- assigned_department_id、assigned_user_id、priority
-- accepted_at、resolved_at、closed_at、version
-- occurred_at_text、occurred_at_start/end、occurred_at_precision、timezone
-
-旧 `occurred_at` 列保留作 schema 兼容，写入时与 `occurred_at_text` 同步。旧中文状态在 migration 中映射为英文代码。状态、优先级均有 CHECK 约束。
-
-`ticket_status_history` 是业务处理记录：operator_user_id、operation_type、content、previous/current_status、created_at；保留旧 remark 列兼容。创建、状态变化和联系方式修改都会追加记录。
-
-`audit_logs` 是系统安全记录，保存主体类型/用户、动作、资源、结果和经过秘密字段过滤的 JSON details；不保存密码或完整 Token。
+1. 新版本先写入 staging `index_batch_id`；
+2. `index_status=ready` 后切换 `active_index_batch` 并 `PUBLISHED`；
+3. 之后才把旧 `replaces_doc_id` 标为 `WITHDRAWN`；
+4. 失败时旧版保持 `PUBLISHED` + 旧 batch 可检索；
+5. `FOR UPDATE` 防止并发 building 产生多个 active batch。
 
 ## 并发与索引
 
-- `ticket_id`、`idempotency_key` 唯一；编号来自 PostgreSQL sequence。
-- 更新用 `WHERE version=:expected_version` 原子递增，冲突返回 HTTP 409。
-- 索引覆盖状态+时间、部门+状态、创建人+时间、匿名创建摘要、联系方式+时间、历史、用户部门角色和审计检索。
+- 工单更新：`WHERE version=:expected` 原子递增，冲突 409。
+- Embedding 检索仅 `embedding_fallback='none'` 且 model/dimension 匹配。
 
-## 实际迁移验证
+## 迁移验证
 
-升级前 `alembic_version=0001`、工单 87 条；原 volume 上执行 Backend 启动迁移后为 `0002`、仍为 87 条、7 个部门存在，原工单可按编号查询。未删除或重建 volume。
+本地/CI：`alembic upgrade head` + `alembic check`（无漂移）。历史 volume 从早期 revision 可连续升级到 0023。

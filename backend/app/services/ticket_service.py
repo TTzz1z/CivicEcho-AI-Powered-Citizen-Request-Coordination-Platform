@@ -45,9 +45,14 @@ class TicketService:
     def _default_principal() -> Principal:
         return Principal(kind="service", username="legacy-test", role="service")
 
-    def _audit(self, principal, action, outcome="success", ticket_id=None, details=None):
+    def _audit(self, principal, action, outcome="success", ticket_id=None, details=None, *, commit: bool = True):
         if self.audit:
-            self.audit.log(principal, action, outcome, "ticket" if ticket_id else None, ticket_id, details)
+            self.audit.log(principal, action, outcome, "ticket" if ticket_id else None, ticket_id, details,
+                           commit=commit)
+
+    def _db(self):
+        """Shared SQLAlchemy session when using Postgres-backed repositories."""
+        return getattr(self.repository, "db", None) or getattr(self.work_orders, "db", None)
 
     def create(self, data: TicketCreate, principal: Principal | None = None) -> CreateResult:
         principal = principal or self._default_principal()
@@ -189,7 +194,7 @@ class TicketService:
 
     def _transition(self, ticket_id: str, action: str, version: int, remark: str, principal: Principal,
                     updates: dict | None = None, history_content: str | None = None,
-                    visibility: str = "internal"):
+                    visibility: str = "internal", *, commit: bool = True, run_aftercare: bool = True):
         ticket = self.get(ticket_id)
         # P0-R4: permission check MUST come before version check. Otherwise a
         # caller without the required role could enumerate the current version
@@ -220,15 +225,20 @@ class TicketService:
             values["closed_at"] = now
         elif action == "process" and ticket.status == "resolved":
             values["resolved_at"] = None
+        previous_status = ticket.status
         updated = self.repository.transition(
             ticket.ticket_id, version, new_status, action, history_content or remark,
-            principal.user_id, values, visibility,
+            principal.user_id, values, visibility, commit=commit,
         )
         if not updated:
             raise VersionConflict()
         audit_action = {"accept": "accept_ticket", "assign": "assign_ticket", "reject": "reject_ticket", "note": "add_ticket_note"}.get(action, "change_ticket_status")
-        self._audit(principal, audit_action, ticket_id=ticket.ticket_id, details={"from": ticket.status, "to": new_status})
-        if self.aftercare:
+        self._audit(
+            principal, audit_action, ticket_id=ticket.ticket_id,
+            details={"from": previous_status, "to": new_status},
+            commit=commit,
+        )
+        if run_aftercare and self.aftercare:
             event = {"accept": "ticket_accepted", "assign": "ticket_assigned", "resolve": "resolved", "close": "closed"}.get(action)
             if event:
                 self.aftercare.on_ticket_event(event, updated, principal)
@@ -283,22 +293,38 @@ class TicketService:
             user = self.users.get(assigned_user_id) if self.users else None
             if not user or not user.is_active or user.role != "department_staff" or user.department_id != department_id:
                 raise BusinessError("INVALID_ASSIGNEE", "承办人必须是该部门的启用部门人员", 409)
-        result = self._transition(ticket_id, "assign", version, remark, principal, {
-            "assigned_department_id": department_id,
-            "assigned_user_id": assigned_user_id,
-            "collaboration_status": "in_progress",
-        })
-        if self.work_orders and not any(
-            item.task_type == "primary" and item.status in {"pending", "processing", "submitted"}
-            for item in self.work_orders.list_for_ticket(ticket_id)
-        ):
-            item = WorkOrderModel(
-                id=str(uuid4()), work_order_no=f"{ticket_id}-M-{uuid4().hex[:8].upper()}", ticket_id=ticket_id,
-                task_type="primary", status="pending", department_id=department_id,
-                assignee_user_id=assigned_user_id, instructions=remark, created_by_user_id=principal.user_id,
+        db = self._db()
+        try:
+            result = self._transition(
+                ticket_id, "assign", version, remark, principal, {
+                    "assigned_department_id": department_id,
+                    "assigned_user_id": assigned_user_id,
+                    "collaboration_status": "in_progress",
+                },
+                commit=False, run_aftercare=False,
             )
-            self.work_orders.add(item, principal.user_id, "create", remark)
-            self.work_orders.commit()
+            if self.work_orders and not any(
+                item.task_type == "primary" and item.status in {"pending", "processing", "submitted"}
+                for item in self.work_orders.list_for_ticket(ticket_id)
+            ):
+                item = WorkOrderModel(
+                    id=str(uuid4()), work_order_no=f"{ticket_id}-M-{uuid4().hex[:8].upper()}", ticket_id=ticket_id,
+                    task_type="primary", status="pending", department_id=department_id,
+                    assignee_user_id=assigned_user_id, instructions=remark, created_by_user_id=principal.user_id,
+                )
+                self.work_orders.add(item, principal.user_id, "create", remark)
+            if db is not None:
+                db.commit()
+            elif self.work_orders:
+                self.work_orders.commit()
+        except Exception:
+            if db is not None:
+                db.rollback()
+            elif self.work_orders:
+                self.work_orders.rollback()
+            raise
+        if self.aftercare:
+            self.aftercare.on_ticket_event("ticket_assigned", self.get(ticket_id), principal)
         return result
 
     def process(self, ticket_id, version, remark, principal):
@@ -308,18 +334,34 @@ class TicketService:
             if ticket.assigned_user_id not in {None, principal.user_id}:
                 raise PermissionDenied("该工单已分派给其他承办人")
             updates = {"assigned_user_id": principal.user_id}
-        result = self._transition(ticket_id, "process", version, remark, principal, updates)
-        if self.work_orders:
-            primary = next((item for item in self.work_orders.list_for_ticket(ticket_id)
-                            if item.task_type == "primary" and item.status == "pending"), None)
-            if primary:
-                previous = primary.status
-                primary.status = "processing"
-                primary.accepted_at = datetime.now(timezone.utc)
-                primary.assignee_user_id = principal.user_id if principal.role == "department_staff" else primary.assignee_user_id
-                primary.version += 1
-                self.work_orders.record(primary, principal.user_id, "start", previous, remark)
+        db = self._db()
+        try:
+            result = self._transition(
+                ticket_id, "process", version, remark, principal, updates,
+                commit=False, run_aftercare=False,
+            )
+            if self.work_orders:
+                primary = next((item for item in self.work_orders.list_for_ticket(ticket_id)
+                                if item.task_type == "primary" and item.status == "pending"), None)
+                if primary:
+                    previous = primary.status
+                    primary.status = "processing"
+                    primary.accepted_at = datetime.now(timezone.utc)
+                    primary.assignee_user_id = (
+                        principal.user_id if principal.role == "department_staff" else primary.assignee_user_id
+                    )
+                    primary.version += 1
+                    self.work_orders.record(primary, principal.user_id, "start", previous, remark)
+            if db is not None:
+                db.commit()
+            elif self.work_orders:
                 self.work_orders.commit()
+        except Exception:
+            if db is not None:
+                db.rollback()
+            elif self.work_orders:
+                self.work_orders.rollback()
+            raise
         return result
 
     def add_note(self, ticket_id, version, remark, principal):

@@ -4,7 +4,9 @@
  * Goals:
  * - TTL on session messages and drafts (default 24h)
  * - Strip long-lived contact fields from drafts
+ * - Redact ID / phone / address-like PII in persisted text
  * - Clear on logout / account switch
+ * - Multi-tab logout sync via BroadcastChannel + storage event
  * - Compatibly purge legacy cache shapes without savedAt
  */
 
@@ -16,6 +18,8 @@ const SESSION_PREFIX = 'tingting_session_'
 const BOUND_PREFIX = 'tingting_bound_'
 const PRE_REVIEW_PREFIX = 'tingting_pre_review_draft_'
 const SENDER_KEY = 'tingting_sender_id'
+const PRIVACY_CLEAR_SIGNAL = 'tingting_privacy_clear'
+const PRIVACY_CHANNEL = 'tingting-chat-privacy'
 
 type Envelope<T> = { v: 1; savedAt: number; data: T }
 
@@ -45,7 +49,32 @@ function readEnvelope<T>(raw: string | null): Envelope<T> | null {
   }
 }
 
-/** Persist chat messages with TTL envelope. */
+/** Redact mainland ID card / mobile / address-like spans before persist. */
+export function redactSensitiveText(text: string): string {
+  if (!text) return text
+  return text
+    .replace(/[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]/g, '[身份证已脱敏]')
+    .replace(/(?<![0-9])1[3-9]\d{9}(?![0-9])/g, '[手机号已脱敏]')
+    .replace(
+      /[\u4e00-\u9fa5]{1,12}(?:省|市|自治区|特别行政区)?[\u4e00-\u9fa5]{0,12}(?:市|州|盟|地区)?[\u4e00-\u9fa5]{1,12}(?:区|县|旗|市)[\u4e00-\u9fa5\d\-号楼室单元栋门弄巷街路]{2,48}/g,
+      '[地址已脱敏]',
+    )
+}
+
+function redactValue(value: unknown): unknown {
+  if (typeof value === 'string') return redactSensitiveText(value)
+  if (Array.isArray(value)) return value.map(redactValue)
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = redactValue(v)
+    }
+    return out
+  }
+  return value
+}
+
+/** Persist chat messages with TTL envelope and PII redaction. */
 export function loadChatMessages<T>(key: string, ttlMs = CHAT_CACHE_TTL_MS): T[] {
   const env = readEnvelope<T[]>(localStorage.getItem(key))
   if (!env || isExpired(env.savedAt, ttlMs) || !Array.isArray(env.data)) {
@@ -56,18 +85,22 @@ export function loadChatMessages<T>(key: string, ttlMs = CHAT_CACHE_TTL_MS): T[]
 }
 
 export function saveChatMessages<T>(key: string, messages: T[]): void {
-  localStorage.setItem(key, JSON.stringify(wrap(messages.slice(-80))))
+  const redacted = redactValue(messages.slice(-80)) as T[]
+  localStorage.setItem(key, JSON.stringify(wrap(redacted)))
 }
 
 type DraftLike = object
 
 /** Contact and similar fields must not linger in long-lived browser storage. */
 export function sanitizeDraftForStorage<T extends object>(draft: T): T {
-  const next = { ...draft } as T & Record<string, unknown>
+  const next: Record<string, unknown> = { ...(draft as Record<string, unknown>) }
   delete next.contact
   delete next.phone
   delete next.mobile
-  return next
+  for (const [k, v] of Object.entries(next)) {
+    if (typeof v === 'string') next[k] = redactSensitiveText(v)
+  }
+  return next as T
 }
 
 export function loadChatDraft<T extends object>(key: string, ttlMs = CHAT_CACHE_TTL_MS): T | null {
@@ -108,6 +141,55 @@ export function clearChatPrivacyStorage(options?: { keepAnonymousSender?: boolea
   }
 }
 
+/**
+ * Notify other tabs to clear chat privacy caches.
+ * Prefer BroadcastChannel; also poke a localStorage signal for storage-event fallback.
+ */
+export function broadcastChatPrivacyClear(): void {
+  try {
+    const channel = new BroadcastChannel(PRIVACY_CHANNEL)
+    channel.postMessage({ type: 'clear', at: now() })
+    channel.close()
+  } catch {
+    // BroadcastChannel unavailable — storage signal still helps other tabs.
+  }
+  try {
+    localStorage.setItem(PRIVACY_CLEAR_SIGNAL, String(now()))
+    localStorage.removeItem(PRIVACY_CLEAR_SIGNAL)
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+/** Subscribe to multi-tab privacy clear (BroadcastChannel + storage event). */
+export function subscribeChatPrivacyClear(onClear: () => void): () => void {
+  let channel: BroadcastChannel | null = null
+  const handleMessage = (event: MessageEvent) => {
+    if (event?.data?.type === 'clear') onClear()
+  }
+  try {
+    channel = new BroadcastChannel(PRIVACY_CHANNEL)
+    channel.addEventListener('message', handleMessage)
+  } catch {
+    channel = null
+  }
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === PRIVACY_CLEAR_SIGNAL) onClear()
+  }
+  window.addEventListener('storage', handleStorage)
+  return () => {
+    channel?.removeEventListener('message', handleMessage)
+    channel?.close()
+    window.removeEventListener('storage', handleStorage)
+  }
+}
+
+/** Clear local privacy data and broadcast to other tabs. */
+export function clearChatPrivacyStorageAndBroadcast(options?: { keepAnonymousSender?: boolean }): void {
+  clearChatPrivacyStorage(options)
+  broadcastChatPrivacyClear()
+}
+
 /** When switching authenticated users, drop previous user's chat/draft keys. */
 export function clearChatPrivacyOnAccountSwitch(previousUserId?: number | null, nextUserId?: number | null): void {
   if (previousUserId && previousUserId !== nextUserId) {
@@ -131,4 +213,6 @@ export const chatStorageKeys = {
   BOUND_PREFIX,
   PRE_REVIEW_PREFIX,
   SENDER_KEY,
+  PRIVACY_CLEAR_SIGNAL,
+  PRIVACY_CHANNEL,
 }

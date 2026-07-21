@@ -278,16 +278,12 @@ def main() -> int:
         headers=auth(staff_token),
         timeout=30,
     )
-    if resp.status_code < 400:
-        check("10a. Dept resolve denied", False, f"dept could resolve! status={resp.status_code}")
-    else:
-        err_code = ""
-        try:
-            err_body = resp.json()
-            err_code = err_body.get("error", {}).get("code", "") if isinstance(err_body.get("error"), dict) else ""
-        except Exception:
-            pass
-        check("10a. Dept resolve denied", err_code in ("PERMISSION_DENIED", "INVALID_STATUS_TRANSITION") or resp.status_code in (403, 409, 422), f"errCode={err_code}, http={resp.status_code}")
+    # Legacy /resolve is removed; only review-resolve remains.
+    check(
+        "10a. Dept resolve denied",
+        resp.status_code == 404,
+        f"expected 404 for removed /resolve, http={resp.status_code}",
+    )
 
     print("\n=== Acceptance Main Flow Result ===")
     print(f"PASS: {PASS}")

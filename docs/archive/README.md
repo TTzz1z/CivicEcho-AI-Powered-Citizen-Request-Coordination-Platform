@@ -1,7 +1,9 @@
 # 归档说明
 
-本目录用于存放阶段性过程文档（Round / 阶段验收报告等）。
+本目录存放阶段性过程文档与过期测试报告，**不代表当前 main**。
 
-当前仓库已不再保留历史 Round 验收报告正文；若后续需要归档过程材料，请放入本目录，避免与 `README.md`、`PRODUCT.md`、`ENGINEERING.md` 的现行基线冲突。
+现行基线请以仓库根目录 `README.md` / `PRODUCT.md` / `ENGINEERING.md` 以及 `docs/final-test-report.md` 为准。
 
-测试文件名中的 `round2` / `round4`、迁移文件名中的历史标记仅作追溯，不代表仍有未完成的阶段性交付。
+| 归档文件 | 说明 |
+|---|---|
+| `final-test-report-2026-07-21.md` | Round 3 收口期报告（head 当时为 0018），已过期 |

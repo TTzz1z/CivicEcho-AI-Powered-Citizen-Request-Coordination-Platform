@@ -229,25 +229,11 @@ jobs:
         run: |
           set -eux
           for i in $(seq 1 90); do
-            status=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps --format json clamav | python -c "import sys,json; raw=sys.stdin.read().strip();
-import json as J
-objs=[]
-for line in raw.splitlines():
-  line=line.strip()
-  if not line: continue
-  objs.append(J.loads(line) if line.startswith('{') else None)
-# compose may emit NDJSON or a JSON array
-if raw.startswith('['):
-  data=J.loads(raw); row=data[0] if data else {}
-elif objs:
-  row=objs[0]
-else:
-  row={}
-print(row.get('Health') or row.get('State') or '')" || true)
-            echo "clamav health=$status attempt=$i"
-            if echo "$status" | grep -qi healthy; then
+            if docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T clamav /usr/local/bin/clamdcheck.sh; then
+              echo "clamav healthy"
               exit 0
             fi
+            echo "clamav not ready attempt=$i"
             sleep 10
           done
           docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps

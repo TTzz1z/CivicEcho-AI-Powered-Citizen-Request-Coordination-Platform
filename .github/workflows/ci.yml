@@ -213,7 +213,13 @@ jobs:
       - name: Validate production compose
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod config -q
       - name: Start production compose
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build
+        run: |
+          set -eux
+          if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build; then
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps -a || true
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=150 || true
+            exit 1
+          fi
       - name: Wait for core services (postgres/minio/backend)
         run: |
           set -eux

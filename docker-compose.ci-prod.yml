@@ -1,7 +1,16 @@
 # CI-only override for production-compose job.
-# ClamAV signature download often exceeds compose depends_on wait; wait separately in the workflow.
+# 1) Keep postgres/minio healthy deps (compose replaces depends_on wholesale).
+# 2) ClamAV signature download is slow — wait with service_started, then poll in workflow.
 services:
   backend:
     depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
       clamav:
         condition: service_started
+  caddy:
+    # Avoid privileged 80/443 contention on shared CI runners.
+    ports: !override
+      - "8088:80"

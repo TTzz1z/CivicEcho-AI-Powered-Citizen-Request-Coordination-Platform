@@ -1,0 +1,129 @@
+# Production-equivalent override.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
+# Requires: .env.prod (copy from .env.prod.example and fill strong secrets)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-localhost}"
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  clamav:
+    image: mkodockx/docker-clamav:alpine
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    ports: !override []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  minio:
+    ports: !override []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    ports: !override []
+    environment:
+      APP_ENV: "production"
+      CORS_ORIGINS: "${CORS_ORIGINS:?Set CORS_ORIGINS in .env.prod}"
+      OBJECT_STORAGE_SECURE: "true"
+      MALWARE_SCAN_MODE: "http"
+      MALWARE_SCAN_URL: "http://clamav:9000/scan"
+      MALWARE_SCAN_REQUIRE_CLEAN: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  duckling:
+    ports: !override []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  action_server:
+    ports: !override []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  rasa:
+    ports: !override []
+    command: ["run", "--enable-api", "--cors", "${CORS_ORIGINS}", "--port", "5005", "--model", "/app/models/tingting-v1.1.0-rasa3.6.20.tar.gz"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  clamav_data:

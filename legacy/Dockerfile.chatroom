@@ -1,0 +1,22 @@
+# ISOLATED LEGACY ASSET — 不参与当前 8 服务 Compose，仅历史参考。见 legacy/README.md。
+# docker build -t chatroom -f legacy/Dockerfile.chatroom legacy/
+# docker run --name chatroom -p 8080:3000 -d chatroom
+FROM node:14
+
+RUN node --version
+
+RUN git clone https://github.com/RasaHQ/chatroom.git
+
+WORKDIR /chatroom
+
+RUN curl -o- -L https://yarnpkg.com/install.sh | bash
+RUN yarn
+
+# replace default chatroom index.html
+COPY chatroom_handoff.html index.html
+
+RUN yarn build
+
+EXPOSE 8080
+
+CMD [ "yarn", "serve" ]

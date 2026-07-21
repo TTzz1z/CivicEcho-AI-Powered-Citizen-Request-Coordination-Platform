@@ -1,0 +1,11 @@
+# Rasa SDK 3.6 uses Python 3.10. Pin vulnerable base packages to supported
+# releases so the built runtime, rather than only this input file, is auditable.
+pip==26.1.2
+setuptools==83.0.0
+wheel==0.46.2
+sanic-cors==2.2.0
+ujson==5.13.0
+requests==2.33.0
+httpx==0.28.1
+# actions use the pre-0.17 safe_load API
+ruamel.yaml==0.16.13

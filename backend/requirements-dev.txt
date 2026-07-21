@@ -1,0 +1,4 @@
+-r requirements.lock.txt
+httpx2==2.5.0
+pytest==8.3.4
+ruff==0.8.6

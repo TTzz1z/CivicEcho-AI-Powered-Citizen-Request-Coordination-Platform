@@ -1,0 +1,371 @@
+version: '3.1'
+session_config:
+  session_expiration_time: 0.0
+  carry_over_slots_to_new_session: true
+intents:
+- greet
+- goodbye
+- bot_challenge
+- password_reset
+- inform
+- thank
+- help
+- problem_email
+- open_incident:
+    use_entities: []
+- incident_status
+- out_of_scope
+- restart
+- affirm
+- deny
+- trigger_handoff
+- human_handoff
+- handoff
+- submit_complaint
+- submit_suggestion
+- policy_consultation
+- request_help
+- query_request_status
+- provide_information
+- cancel_request
+entities:
+- email
+- priority
+- handoff_to
+- request_type
+- location
+- event
+- time
+- target
+- contact
+- description
+- ticket_id
+slots:
+  confirm:
+    type: bool
+    influence_conversation: false
+    mappings:
+    - type: from_intent
+      intent: affirm
+      value: true
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: confirm
+    - type: from_intent
+      intent: deny
+      value: false
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: confirm
+  previous_email:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  caller_id:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  email:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: email
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: email
+      - active_loop: incident_status_form
+        requested_slot: email
+    - type: from_intent
+      intent: affirm
+      value: true
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: email
+      - active_loop: incident_status_form
+        requested_slot: email
+    - type: from_intent
+      intent: deny
+      value: false
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: email
+      - active_loop: incident_status_form
+        requested_slot: email
+    - type: from_entity
+      entity: email
+  incident_title:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_trigger_intent
+      intent: password_reset
+      value: 密码重置问题
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: incident_title
+    - type: from_trigger_intent
+      intent: problem_email
+      value: 邮箱相关问题
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: incident_title
+    - type: from_text
+      not_intent:
+      - incident_status
+      - bot_challenge
+      - help
+      - affirm
+      - deny
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: incident_title
+  priority:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: priority
+      conditions:
+      - active_loop: open_incident_form
+    - type: from_entity
+      entity: priority
+  problem_description:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_text
+      not_intent:
+      - incident_status
+      - bot_challenge
+      - help
+      - affirm
+      - deny
+      conditions:
+      - active_loop: open_incident_form
+        requested_slot: problem_description
+  requested_slot:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  handoff_to:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: handoff_to
+  request_type:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: request_type
+    - type: from_text
+      conditions:
+      - active_loop: public_request_form
+        requested_slot: request_type
+  description:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: description
+    - type: from_text
+      conditions:
+      - active_loop: public_request_form
+        requested_slot: description
+  location:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: location
+    - type: from_text
+      conditions:
+      - active_loop: public_request_form
+        requested_slot: location
+  event:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: event
+  time:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: time
+  time_start:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  time_end:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  time_precision:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  time_timezone:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  target:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: target
+  contact:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: contact
+  ticket_id:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: ticket_id
+  last_ticket_id:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  idempotency_key:
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: custom
+  confirmation_pending:
+    type: bool
+    influence_conversation: true
+    mappings:
+    - type: custom
+  correction_pending:
+    type: bool
+    influence_conversation: true
+    mappings:
+    - type: custom
+  awaiting_ticket_id:
+    type: bool
+    influence_conversation: true
+    mappings:
+    - type: custom
+responses:
+  utter_out_of_scope:
+  - text: 抱歉，我暂时无法处理这个问题。我主要提供政策咨询、办事指南、投诉建议、公共事务求助和工单进度查询。您可以告诉我想了解的政策、需要办理的事项，或者需要反映的问题。
+  utter_greet:
+  - text: 您好，我是倾听助手，可以登记政务投诉、建议、咨询和求助。
+  utter_goodbye:
+  - text: 再见，如有需要欢迎随时回来。
+  utter_iamabot:
+  - text: 我是倾听助手，由政务服务平台提供支持。我可以帮您咨询政策、提交投诉建议、查询工单进度。
+  utter_ask_email:
+  - text: 请提供您的联系邮箱，方便部门跟进反馈。
+  utter_ask_incident_title:
+  - text: 请用一句话概括您要反映的问题。
+  utter_ask_problem_description:
+  - text: 请详细描述您遇到的问题，包括地点、时间和具体诉求。
+  utter_ask_priority:
+  - text: 请问您希望按什么紧急程度处理？
+    buttons:
+    - payload: /inform{"priority":"low"}
+      title: 一般
+    - payload: /inform{"priority":"medium"}
+      title: 较急
+    - payload: /inform{"priority":"high"}
+      title: 紧急
+  utter_no_priority:
+  - text: 抱歉，"{priority}" 不是有效的紧急程度，请重新选择。
+  utter_no_email:
+  - text: 抱歉，未找到与邮箱 "{email}" 关联的工单记录，请确认后重试。
+  utter_help:
+  - text: "我可以帮您：\n- 提交投诉、建议、咨询或求助事项\n- 查询工单办理进度\n- 咨询政策或办事指南\n- 转接人工服务\n\n请直接用一句话描述您的需求。"
+  utter_welcome:
+  - text: 不客气，希望对您有帮助。
+  utter_default:
+  - text: 我没有完全理解，请换一种方式描述您的诉求。
+  utter_ask_use_previous_email:
+  - text: 是否继续使用您上次的联系邮箱 {previous_email}？
+  utter_ask_confirm:
+  - text: "请确认是否按以下信息提交诉求：\n    联系邮箱：{email}\n    问题描述：{problem_description}\n    概要：{incident_title}\n    紧急程度：{priority}"
+    buttons:
+    - title: 确认提交
+      payload: /affirm
+    - title: 取消提交
+      payload: /deny
+  utter_incident_creation_canceled:
+  - text: 好的，已取消本次诉求提交。
+  utter_ask_whatelse:
+  - text: 请问还有其他可以帮您的吗？
+  utter_ask_handoff:
+  - text: 看起来您希望转接人工服务。
+  utter_handoff:
+  - text: 好的，正在为您尝试转接人工服务。
+  utter_wouldve_handed_off:
+  - text: 当前会话暂不支持实时转接，您可以访问：{handoffhost} 获取人工服务。
+  utter_no_handoff:
+  - text: 当前未配置可用的转接通道，建议拨打 12345 政务服务热线联系人工。
+  utter_ask_request_type:
+  - text: 请问这项诉求属于投诉、建议、咨询还是求助？
+    buttons:
+    - title: 投诉
+      payload: '/provide_information{"request_type":"投诉"}'
+    - title: 建议
+      payload: '/provide_information{"request_type":"建议"}'
+    - title: 咨询
+      payload: '/provide_information{"request_type":"咨询"}'
+    - title: 求助
+      payload: '/provide_information{"request_type":"求助"}'
+  utter_ask_description:
+  - text: 请具体描述一下您的诉求。
+  utter_ask_location:
+  - text: 请问事情发生在哪里？如果咨询事项没有具体地点，请回复“不适用”。
+forms:
+  open_incident_form:
+    ignored_intents: []
+    required_slots:
+    - email
+    - priority
+    - problem_description
+    - incident_title
+    - confirm
+  incident_status_form:
+    ignored_intents: []
+    required_slots:
+    - email
+  public_request_form:
+    ignored_intents:
+    - cancel_request
+    required_slots:
+    - request_type
+    - description
+    - location
+actions:
+- action_ask_email
+- action_check_incident_status
+- action_handoff
+- action_handoff_options
+- action_open_incident
+- validate_open_incident_form
+- validate_incident_status_form
+- action_start_public_request
+- validate_public_request_form
+- action_prepare_request_summary
+- action_request_public_request_correction
+- action_apply_public_request_correction
+- action_create_public_request
+- action_query_public_request
+- action_reset_public_request
+- action_extract_request_draft

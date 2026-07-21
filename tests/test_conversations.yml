@@ -1,0 +1,347 @@
+version: "3.0"
+stories:
+- story: bot challenge
+  steps:
+  - intent: bot_challenge
+    user: |-
+      Are you a bot?
+  - action: utter_iamabot
+
+- story: out of scope
+  steps:
+  - intent: out_of_scope
+    user: |-
+      I want a pizza
+  - action: utter_out_of_scope
+
+- story: open incident
+  steps:
+  - intent: greet
+    user: |-
+      hello
+  - action: utter_greet
+  - action: utter_help
+  - intent: open_incident
+    user: |-
+      I need to open an incident
+  - action: open_incident_form
+  - active_loop: open_incident_form
+  - active_loop: null
+  - action: action_open_incident
+
+- story: open password reset incident
+  steps:
+  - intent: password_reset
+    user: |-
+      I'm having issues with my password
+  - action: open_incident_form
+  - active_loop: open_incident_form
+  - active_loop: null
+  - action: action_open_incident
+
+- story: email incident
+  steps:
+  - intent: greet
+    user: |-
+      hello
+  - action: utter_greet
+  - action: utter_help
+  - intent: problem_email
+    user: |-
+      I have a problem with my email
+  - action: open_incident_form
+  - active_loop: open_incident_form
+  - active_loop: null
+  - action: action_open_incident
+
+- story: interrupted
+  steps:
+  - intent: problem_email
+    user: |-
+      I have a problem with my email
+  - action: open_incident_form
+  - active_loop: open_incident_form
+  - intent: help
+  - action: utter_help
+  - action: open_incident_form
+  - active_loop: null
+  - action: action_open_incident
+
+- story: greet + thank
+  steps:
+  - intent: greet
+    user: |-
+      Hey there
+  - action: utter_greet
+  - action: utter_help
+  - intent: thank
+    user: |-
+      Awesome, thanks!
+  - action: utter_welcome
+
+- story: user requests a human handoff
+  steps:
+  - intent: human_handoff
+    user: |-
+      I want to talk to a person now
+  - action: utter_ask_handoff
+  - action: action_handoff_options
+  - intent: deny
+    user: |-
+      uh no
+  - action: utter_ask_whatelse
+
+- story: User says something out of scope
+  steps:
+  - intent: out_of_scope
+    user: |-
+      Can you get me a pizza
+  - action: utter_out_of_scope
+
+- story: trigger handoff
+  steps:
+  - intent: human_handoff
+    user: |-
+      give me a human
+  - action: utter_ask_handoff
+  - action: action_handoff_options
+  - intent: trigger_handoff
+  - action: action_handoff
+
+- story: Test fallback
+  steps:
+  - intent: nlu_fallback
+  - action: utter_default
+
+- story: incident status happy path 
+  steps:
+  - intent: greet
+    user: |-
+      Hey there
+  - action: utter_greet
+  - action: utter_help
+  - intent: incident_status
+    user: |-
+      Can you check the status of my incident
+  - action: incident_status_form
+  - active_loop: incident_status_form
+  - active_loop: null
+  - action: action_check_incident_status
+
+- story: Chinese complaint registration succeeds
+  steps:
+  - intent: submit_complaint
+    user: |-
+      幸福社区的垃圾三天没人清理
+    entities:
+    - location: 幸福社区
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 投诉
+    - description: 幸福社区的垃圾三天没人清理
+    - location: 幸福社区
+  - action: public_request_form
+  - active_loop: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+  - slot_was_set:
+    - confirmation_pending: true
+  - intent: affirm
+  - action: action_create_public_request
+
+- story: Chinese suggestion registration succeeds
+  steps:
+  - intent: submit_suggestion
+    user: |-
+      希望幸福路增加一个公交站
+    entities:
+    - location: 幸福路
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 建议
+    - description: 希望幸福路增加一个公交站
+    - location: 幸福路
+  - action: public_request_form
+  - active_loop: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+  - slot_was_set:
+    - confirmation_pending: true
+  - intent: affirm
+  - action: action_create_public_request
+
+- story: Chinese consultation registration succeeds
+  steps:
+  - intent: policy_consultation
+    user: |-
+      办理居住证需要什么材料
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 咨询
+    - description: 办理居住证需要什么材料
+  - action: public_request_form
+  - active_loop: public_request_form
+  - intent: provide_information
+    user: |-
+      不适用
+  - slot_was_set:
+    - location: 不适用
+  - action: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+  - slot_was_set:
+    - confirmation_pending: true
+  - intent: affirm
+  - action: action_create_public_request
+
+- story: Chinese help registration succeeds
+  steps:
+  - intent: request_help
+    user: |-
+      和平社区老人行动不便需要上门办理
+    entities:
+    - location: 和平社区
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 求助
+    - description: 和平社区老人行动不便需要上门办理
+    - location: 和平社区
+  - action: public_request_form
+  - active_loop: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+  - slot_was_set:
+    - confirmation_pending: true
+  - intent: affirm
+  - action: action_create_public_request
+
+- story: Chinese request asks for missing location
+  steps:
+  - intent: submit_complaint
+    user: |-
+      垃圾已经三天没人清理
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 投诉
+    - description: 垃圾已经三天没人清理
+  - action: public_request_form
+  - active_loop: public_request_form
+  - intent: provide_information
+    user: |-
+      幸福社区
+  - slot_was_set:
+    - location: 幸福社区
+  - action: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+
+- story: Chinese request does not ask for known location
+  steps:
+  - intent: submit_complaint
+    user: |-
+      人民路井盖坏了
+    entities:
+    - location: 人民路
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 投诉
+    - description: 人民路井盖坏了
+    - location: 人民路
+  - action: public_request_form
+  - active_loop: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+
+- story: Chinese request summary denied and location corrected
+  steps:
+  - intent: deny
+  - action: action_request_public_request_correction
+  - slot_was_set:
+    - correction_pending: true
+  - intent: provide_information
+    user: |-
+      地点改成和平路小学门口
+    entities:
+    - location: 和平路小学门口
+  - slot_was_set:
+    - location: 和平路小学门口
+  - action: action_apply_public_request_correction
+  - action: action_prepare_request_summary
+
+- story: Chinese active registration is cancelled
+  steps:
+  - intent: submit_complaint
+    user: |-
+      垃圾没人清理
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 投诉
+    - description: 垃圾没人清理
+  - action: public_request_form
+  - active_loop: public_request_form
+  - intent: cancel_request
+  - action: action_deactivate_loop
+  - active_loop: null
+  - action: action_reset_public_request
+
+- story: Chinese public request status query with id
+  steps:
+  - intent: query_request_status
+    user: |-
+      查询 QT202607130001 的状态
+    entities:
+    - ticket_id: QT202607130001
+  - slot_was_set:
+    - ticket_id: QT202607130001
+  - action: action_query_public_request
+
+- story: Chinese created request is queried in the same conversation
+  steps:
+  - intent: submit_complaint
+    user: |-
+      幸福社区垃圾无人清理
+    entities:
+    - location: 幸福社区
+  - action: action_start_public_request
+  - slot_was_set:
+    - request_type: 投诉
+    - description: 幸福社区垃圾无人清理
+    - location: 幸福社区
+  - action: public_request_form
+  - active_loop: public_request_form
+  - active_loop: null
+  - action: action_prepare_request_summary
+  - slot_was_set:
+    - confirmation_pending: true
+  - intent: affirm
+  - action: action_create_public_request
+  - slot_was_set:
+    - last_ticket_id: QT202607130001
+  - intent: query_request_status
+    user: |-
+      查询刚才的工单状态
+  - action: action_query_public_request
+
+- story: Chinese status query asks for missing id then queries
+  steps:
+  - intent: query_request_status
+    user: |-
+      查一下工单状态
+  - action: action_query_public_request
+  - slot_was_set:
+    - awaiting_ticket_id: true
+  - intent: provide_information
+    user: |-
+      QT202607139999
+    entities:
+    - ticket_id: QT202607139999
+  - slot_was_set:
+    - ticket_id: QT202607139999
+  - action: action_query_public_request
+
+- story: Chinese unrelated input is handled
+  steps:
+  - intent: out_of_scope
+    user: |-
+      给我推荐一部电影
+  - action: utter_out_of_scope

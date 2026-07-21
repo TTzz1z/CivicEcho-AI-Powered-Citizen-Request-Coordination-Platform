@@ -1,0 +1,54 @@
+version: "3.0"
+
+nlu:
+- intent: submit_complaint
+  examples: |
+    - [朝阳小区](location)电梯坏了四天，物业一直不修
+    - [解放桥](location)下面的垃圾堆着没人运走
+    - 窗口让我重复提交同一份材料，已经跑了三回
+    - [昨晚](time)工地施工到凌晨，孩子没法睡觉
+    - 医院收费窗口态度生硬，也不给解释明细
+    - 雨停很久了，[兴华路](location)的积水还是没排掉
+
+- intent: submit_suggestion
+  examples: |
+    - 建议[火车站南广场](location)增设清晰的换乘标识
+    - 希望社区开一个周末儿童托管点
+    - 可以把办事材料一次性告知做得更清楚
+    - [中山公园](location)最好增加适合老人的休息座椅
+    - 建议医院挂号页面提供大字模式
+    - 希望早晚高峰多安排几班接驳公交
+
+- intent: policy_consultation
+  examples: |
+    - 申请人才公寓需要符合哪些要求
+    - 企业变更经营地址要准备什么文件
+    - 医保电子凭证怎么给老人激活
+    - 办理不动产赠与应该去哪个窗口
+    - 社会救助申请可以由亲属代交吗
+    - [下个月](time)幼儿园报名在哪里查看通知
+
+- intent: request_help
+  examples: |
+    - 家中老人卧床，社保认证能否请人上门协助
+    - 我在[客运站](location)丢了证件和手机，请帮我联系工作人员
+    - 暴雪封路，家里病人的药快没有了
+    - 我不会操作自助机，现场也找不到引导人员
+    - 孩子走失了，麻烦立即协助寻找
+    - 楼道起火后家里老人下不来，请求救援
+
+- intent: query_request_status
+  examples: |
+    - 请查一下[QT202607180023](ticket_id)有没有受理
+    - 我提交的民生诉求现在进展如何
+    - 工单[QT202607190116](ticket_id)办完了吗
+
+- intent: cancel_request
+  examples: |
+    - 这次登记不要了
+    - 取消当前填写
+
+- intent: out_of_scope
+  examples: |
+    - 帮我生成一张猫的图片
+    - 今晚哪支球队会赢

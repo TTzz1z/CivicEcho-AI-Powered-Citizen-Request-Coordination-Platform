@@ -1,0 +1,9 @@
+# Keep the Action Server on the same Rasa 3.6 minor release as Core.
+FROM rasa/rasa-sdk:3.6.2@sha256:9ebc0abc5b36d9420343a197bdfd9c478155ca86871dc08f8e823c76f484c948
+
+USER root
+COPY --chown=1001:0 actions/requirements-actions.txt /app/requirements-actions.txt
+RUN pip install --no-cache-dir -r /app/requirements-actions.txt
+COPY --chown=1001:0 actions /app/actions
+COPY --chown=1001:0 tests /app/tests
+USER 1001

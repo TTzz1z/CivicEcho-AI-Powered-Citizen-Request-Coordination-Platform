@@ -1,0 +1,29 @@
+version: "3.1"
+
+stories:
+- story: complaint triggers draft extraction
+  steps:
+  - intent: submit_complaint
+  - action: action_extract_request_draft
+
+- story: suggestion triggers draft extraction
+  steps:
+  - intent: submit_suggestion
+  - action: action_extract_request_draft
+
+- story: consultation triggers draft extraction
+  steps:
+  - intent: policy_consultation
+  - action: action_extract_request_draft
+
+- story: help request triggers draft extraction
+  steps:
+  - intent: request_help
+  - action: action_extract_request_draft
+
+- story: draft extraction followed by ticket query
+  steps:
+  - intent: submit_complaint
+  - action: action_extract_request_draft
+  - intent: query_request_status
+  - action: action_query_public_request

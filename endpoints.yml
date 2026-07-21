@@ -1,0 +1,32 @@
+# This file contains the different endpoints your bot can use.
+
+# Server where the models are pulled from.
+# https://rasa.com/docs/rasa/user-guide/running-the-server/#fetching-models-from-a-server/
+
+#models:
+#  url: http://my-server.com/models/default_core@latest
+#  wait_time_between_pulls:  10   # [optional](default: 100)
+
+# Server which runs your custom actions.
+# https://rasa.com/docs/rasa/core/actions/#custom-actions/
+
+action_endpoint:
+  url: ${ACTION_SERVER_URL}
+
+# Tracker store which is used to store the conversations.
+# PostgreSQL-backed persistence ensures conversations survive restarts.
+# https://rasa.com/docs/rasa/api/tracker-stores/
+
+tracker_store:
+    type: SQL
+    dialect: postgresql
+    url: ${RASA_TRACKER_DB_URL}
+
+# Event broker which all conversation events should be streamed to.
+# https://rasa.com/docs/rasa/api/event-brokers/
+
+#event_broker:
+#  url: localhost
+#  username: username
+#  password: password
+#  queue: queue

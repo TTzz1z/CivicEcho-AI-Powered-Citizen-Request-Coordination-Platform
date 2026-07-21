@@ -1,0 +1,73 @@
+# ----- Python / local environments -----
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.config/
+.keras/
+.rasa/
+.coverage
+htmlcov/
+
+# ----- Environment / secrets -----
+.env
+.env.*
+!.env.example
+!.env.prod.example
+
+# ----- Editors / OS -----
+.DS_Store
+Thumbs.db
+.vscode/
+.history/
+.pytype/
+.idea/
+
+# ----- Rasa generated artifacts -----
+# Keep only the sealed release models explicitly whitelisted below.
+models/*
+!models/tingting-v1.2.0.tar.gz
+!models/tingting-v1.1.0-rasa3.6.20.tar.gz
+results/
+*.db-*
+rasa.db*
+*.db
+
+# ----- Backend / frontend generated artifacts -----
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# ----- Playwright / E2E artifacts -----
+frontend/playwright-report/
+frontend/test-results/
+frontend/test-results-*/
+frontend/e2e-result*
+frontend/e2e-*.log
+frontend/e2e-*.json
+playwright-run.log
+playwright-output.txt
+
+# ----- Root-level stray Node artifacts (R5 cleanup) -----
+node_modules/
+package-lock.json
+
+# ----- Logs / backups / temp -----
+*.log
+backups/
+tmp/
+temp/
+
+# ----- AI agent tool caches -----
+.agents/
+.codex/
+
+# ----- Legacy demo checkout/build -----
+chatroom/

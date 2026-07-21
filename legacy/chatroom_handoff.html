@@ -1,0 +1,27 @@
+<!-- ISOLATED LEGACY ASSET — 不参与当前 8 服务 Compose，仅历史参考。见 legacy/README.md。 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>倾听助手 / Tingting Assistant (Legacy Chatroom)</title>
+  <link rel="stylesheet" href="./dist/Chatroom.css" />
+  <link rel="stylesheet" type="text/css" href="./index.css">
+</head>
+<body>
+  <div class="chat-container"></div>
+
+  <script src="./dist/Chatroom.js"></script>
+  <script type="text/javascript">
+    var chatroom = new window.Chatroom({
+      host: "http://localhost:5005",
+      title: "倾听助手 / Tingting Assistant",
+      container: document.querySelector(".chat-container"),
+      welcomeMessage: "您好，我是倾听助手。"
+      // speechRecognition: "en-US",
+      // voiceLang: "en-US"
+    });
+    chatroom.openChat();
+  </script>
+</body>
+</html>

@@ -213,7 +213,32 @@ jobs:
       - name: Validate production compose
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod config -q
       - name: Start production compose
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build --wait
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --build
+      - name: Wait for core services (postgres/minio/backend)
+        run: |
+          set -eux
+          for i in $(seq 1 60); do
+            if docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
+              echo "backend ready"
+              break
+            fi
+            sleep 5
+          done
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+      - name: Wait for ClamAV
+        run: |
+          set -eux
+          for i in $(seq 1 72); do
+            status=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod ps --format json clamav | python -c "import sys,json; d=json.load(sys.stdin); print((d[0] if isinstance(d,list) else d).get('Health','') if d else '')" || true)
+            echo "clamav health=$status attempt=$i"
+            if echo "$status" | grep -qi healthy; then
+              exit 0
+            fi
+            sleep 10
+          done
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod ps
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod logs --no-color --tail=100 clamav
+          exit 1
       - name: Alembic head and health
         run: |
           docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod exec -T backend alembic current

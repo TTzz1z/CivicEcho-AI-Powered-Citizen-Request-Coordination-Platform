@@ -299,15 +299,16 @@ test('S6. AI case advice + three-state review recorded', async () => {
   await ctx.post(`${API}/api/v1/tickets/${tid}/assign`, { headers: { Authorization: `Bearer ${agent}` }, data: { version: 2, remark: '派发', department_id: deptId } })
   await ctx.post(`${API}/api/v1/tickets/${tid}/process`, { headers: { Authorization: `Bearer ${dept}` }, data: { version: 3, remark: '处理' } })
 
-  // 生成 AI case advice (advisory_only=True)
-  const advice = await ctx.post(`${API}/api/v1/ai/tickets/${tid}/case-advice`, { headers: { Authorization: `Bearer ${agent}` }, data: {} })
-  expect(advice.ok()).toBeTruthy()
-  const adviceBody = await advice.json()
-  expect(adviceBody.data.advisory_only).toBe(true)
-
-  // 三态审核
+  // 三态审核：每次审核需要新的 advice_id（同一建议不可重复审核）
   for (const decision of ['adopted', 'adopted_with_edits', 'rejected']) {
-    const payload: any = { decision }
+    const adviceRes = await ctx.post(`${API}/api/v1/ai/tickets/${tid}/case-advice`, {
+      headers: { Authorization: `Bearer ${agent}` },
+      data: {},
+    })
+    expect(adviceRes.ok()).toBeTruthy()
+    const adviceId = (await adviceRes.json()).data.advice_id
+    expect(adviceId).toBeTruthy()
+    const payload: Record<string, string> = { advice_id: adviceId, decision }
     if (decision === 'adopted_with_edits') payload.edit_summary = '调整措辞'
     const r = await ctx.post(`${API}/api/v1/kb/tickets/${tid}/advice/review`, {
       headers: { Authorization: `Bearer ${agent}` },

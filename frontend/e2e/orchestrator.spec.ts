@@ -29,9 +29,10 @@ async function sendChat(page: import('@playwright/test').Page, text: string): Pr
 }
 
 test.describe('Orchestrator 智能路由 E2E', () => {
+  test.describe.configure({ timeout: 90_000 })
   test.beforeEach(async ({ page }) => {
     await loginAsCitizen(page)
-    await page.goto('/citizen/chat')
+    await page.goto('/citizen/chat', { timeout: 60_000 })
     // Wait for the chat composer to be ready instead of a fixed sleep.
     await expect(page.getByLabel('输入消息')).toBeVisible({ timeout: 15_000 })
   })

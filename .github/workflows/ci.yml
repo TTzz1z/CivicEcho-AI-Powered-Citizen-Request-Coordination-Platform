@@ -216,19 +216,9 @@ jobs:
         env:
           COMPOSE_HTTP_TIMEOUT: "300"
           DOCKER_CLIENT_TIMEOUT: "300"
-          COMPOSE_PARALLEL_LIMIT: "2"
         run: |
           set -eux
-          # Pre-pull heavy images with retries (fresh runners often time out here).
-          for img in clamav/clamav:stable caddy:2-alpine pgvector/pgvector:pg16 minio/minio:RELEASE.2025-04-22T22-12-26Z; do
-            ok=0
-            for attempt in 1 2 3; do
-              if docker pull "$img"; then ok=1; break; fi
-              echo "pull failed for $img attempt=$attempt"
-              sleep 10
-            done
-            test "$ok" = "1"
-          done
+          docker build -f Dockerfile.clamav-mock -t tingting-clamav-mock:ci .
           if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build; then
             docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps -a || true
             docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=200 || true

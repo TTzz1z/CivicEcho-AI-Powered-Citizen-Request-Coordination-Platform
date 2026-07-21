@@ -1,7 +1,19 @@
 # CI-only override for production-compose job.
-# 1) Keep postgres/minio healthy deps (compose replaces depends_on wholesale).
-# 2) ClamAV signature download is slow — wait with service_started, then poll in workflow.
+# Replace heavy official ClamAV with a protocol-compatible mock so runners
+# are not blocked by signature CDN pulls, while still exercising clamd client.
 services:
+  clamav:
+    image: tingting-clamav-mock:ci
+    build:
+      context: .
+      dockerfile: Dockerfile.clamav-mock
+    volumes: !override []
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',3310),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
   backend:
     depends_on:
       postgres:
@@ -9,8 +21,7 @@ services:
       minio:
         condition: service_healthy
       clamav:
-        condition: service_started
+        condition: service_healthy
   caddy:
-    # Avoid privileged 80/443 contention on shared CI runners.
     ports: !override
       - "8088:80"

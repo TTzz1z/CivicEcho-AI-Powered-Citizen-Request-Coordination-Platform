@@ -39,15 +39,18 @@ test.describe('智能对话建单 - 草稿模式', () => {
 
     await expect(page.locator('.draft-panel')).toBeVisible({ timeout: 30_000 })
 
-    // 补全地点（如果缺失）
-    const locationRow = page.locator('.draft-panel').getByText('发生地点')
-    if (await locationRow.isVisible()) {
-      await locationRow.locator('..').getByRole('button').first().click()
-      await page.locator('.draft-panel input[placeholder*="幸福路"]').fill('和平路小学门口')
-      await page.locator('.draft-panel input[placeholder*="幸福路"]').blur()
+    const submitBtn = page.getByRole('button', { name: '确认提交工单' })
+    if (!(await submitBtn.isEnabled())) {
+      // Edit the first missing required field via its descriptions-item row.
+      const pendingRow = page.locator('.draft-panel .ant-descriptions-item').filter({ hasText: '待补充' }).first()
+      await pendingRow.getByRole('button').first().click()
+      const fieldInput = page.locator('.draft-panel input, .draft-panel textarea').first()
+      await fieldInput.fill('和平路小学门口')
+      await fieldInput.blur()
+      await expect(submitBtn).toBeEnabled({ timeout: 5_000 })
     }
 
-    await page.getByRole('button', { name: '确认提交工单' }).click()
+    await submitBtn.click()
     await expect(page.getByText(/QT\d{16}/).first()).toBeVisible({ timeout: 15_000 })
   })
 
@@ -58,15 +61,15 @@ test.describe('智能对话建单 - 草稿模式', () => {
     await expect(page.getByText(/幸福路/).first()).toBeVisible()
 
     const submitBtn = page.getByRole('button', { name: '确认提交工单' })
-    if (await submitBtn.isEnabled()) {
-      await submitBtn.click()
-    } else {
-      // P0-E2E: use the "待补充" tag to locate the edit button instead of an empty-name match.
-      await page.locator('.draft-panel').getByText('待补充').first().locator('..').getByRole('button').first().click()
-      await page.locator('.draft-panel input').first().fill('幸福路社区3号楼旁')
-      await page.locator('.draft-panel input').first().blur()
-      await submitBtn.click()
+    if (!(await submitBtn.isEnabled())) {
+      const pendingRow = page.locator('.draft-panel .ant-descriptions-item').filter({ hasText: '待补充' }).first()
+      await pendingRow.getByRole('button').first().click()
+      const fieldInput = page.locator('.draft-panel input, .draft-panel textarea').first()
+      await fieldInput.fill('幸福路社区3号楼旁')
+      await fieldInput.blur()
+      await expect(submitBtn).toBeEnabled({ timeout: 5_000 })
     }
+    await submitBtn.click()
 
     await expect(page.getByText(/QT\d{16}/).first()).toBeVisible({ timeout: 10_000 })
   })
@@ -79,15 +82,17 @@ test.describe('智能对话建单 - 草稿模式', () => {
     await expect(page.locator('.draft-panel')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('咨询').first()).toBeVisible()
 
-    const locationEdit = page.locator('.draft-panel').filter({ hasText: '发生地点' }).getByRole('button').first()
-    if (await locationEdit.isVisible()) {
-      await locationEdit.click()
-      const locInput = page.locator('.draft-panel input[placeholder*="幸福路"]')
+    const submitBtn = page.getByRole('button', { name: '确认提交工单' })
+    if (!(await submitBtn.isEnabled())) {
+      const locationRow = page.locator('.draft-panel .ant-descriptions-item').filter({ hasText: '发生地点' })
+      await locationRow.getByRole('button').first().click()
+      const locInput = page.locator('.draft-panel input').first()
       await locInput.fill('不适用')
       await locInput.blur()
+      await expect(submitBtn).toBeEnabled({ timeout: 5_000 })
     }
 
-    await page.getByRole('button', { name: '确认提交工单' }).click()
+    await submitBtn.click()
     await expect(page.getByText(/QT\d{16}/).first()).toBeVisible({ timeout: 15_000 })
   })
 })

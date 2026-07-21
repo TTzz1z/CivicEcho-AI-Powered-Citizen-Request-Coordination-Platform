@@ -4,21 +4,30 @@ async function login(page:import('@playwright/test').Page,username:string){await
 async function apiLogin(request:import('@playwright/test').APIRequestContext,username:string){const response=await request.post('/api/v1/auth/login',{data:{username,password}});expect(response.ok()).toBeTruthy();return (await response.json()).data.access_token as string}
 
 test.describe('真实服务工作流',()=>{
-  test('市民通过真实 Rasa 对话创建诉求',async({page})=>{
-    // r2-9: extended to 60s per-response; global-setup pre-warms Rasa webhook.
+  test('市民通过 Orchestrator 对话创建诉求',async({page})=>{
     test.setTimeout(120_000)
     await login(page,'citizen_local');await expect(page).toHaveURL(/citizen\/chat/)
-    const rasaStart=Date.now();await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:'新建会话'}).click()]);console.log(`[rasa] new-session latency=${Date.now()-rasaStart}ms`)
-    await page.getByText('我要提交一条投诉').first().click();await expect(page.getByText('请具体描述一下您的诉求。')).toBeVisible({timeout:20_000})
-    await page.getByLabel('输入消息').fill('路灯坏了三天')
-    const sendStart=Date.now();await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:/^发送$/}).click()]);console.log(`[rasa] send-1 latency=${Date.now()-sendStart}ms`)
-    await expect(page.getByText(/请问事情发生在哪里/)).toBeVisible({timeout:30_000})
-    await page.getByLabel('输入消息').fill('幸福路社区')
-    const send2Start=Date.now();await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:/^发送$/}).click()]);console.log(`[rasa] send-2 latency=${Date.now()-send2Start}ms`)
-    await expect(page.getByText(/请确认以下诉求信息/)).toBeVisible({timeout:30_000})
-    await page.getByRole('button',{name:'确认创建'}).click()
-    await expect(page.getByText(/诉求工单已创建，编号：QT/)).toBeVisible({timeout:20_000})
-    await expect(page.getByText('查看工单详情').first()).toBeVisible()
+    await page.getByRole('button',{name:'新建会话'}).click()
+    await page.getByLabel('输入消息').fill('幸福路社区3号楼旁路灯坏了三天')
+    const sendStart=Date.now()
+    await Promise.all([
+      page.waitForResponse(r=>r.url().includes('/api/v1/orchestrator/chat')&&r.status()===200,{timeout:60_000}),
+      page.getByRole('button',{name:/^发送$/}).click(),
+    ])
+    console.log(`[orchestrator] send latency=${Date.now()-sendStart}ms`)
+    await expect(page.locator('.draft-panel')).toBeVisible({timeout:30_000})
+    const submitBtn=page.getByRole('button',{name:'确认提交工单'})
+    if(!(await submitBtn.isEnabled())){
+      const pendingRow=page.locator('.draft-panel .ant-descriptions-item').filter({hasText:'待补充'}).first()
+      await pendingRow.getByRole('button').first().click()
+      const fieldInput=page.locator('.draft-panel input, .draft-panel textarea').first()
+      await fieldInput.fill('幸福路社区3号楼旁')
+      await fieldInput.blur()
+      await expect(submitBtn).toBeEnabled({timeout:5_000})
+    }
+    await submitBtn.click()
+    await expect(page.getByText(/QT\d{16}/).first()).toBeVisible({timeout:20_000})
+    await expect(page.getByText(/查看工单详情|查看办理进度/).first()).toBeVisible()
   })
   test('坐席可以打开工单工作台',async({page})=>{await login(page,'agent_local');await expect(page).toHaveURL(/agent\/tickets/);await expect(page.getByRole('heading',{name:'坐席工单台'})).toBeVisible()})
   test('部门人员可以打开本部门工单',async({page})=>{await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await expect(page.getByRole('heading',{name:'部门工单'})).toBeVisible()})
@@ -62,7 +71,16 @@ test('真实浏览器生成紧急 AI 提示且不改变工单行政状态',async
   expect(after.status).toBe(before.status);expect(after.version).toBe(before.version)
 })
 
-test('Rasa 不可用时聊天页可降级重试',async({page})=>{await page.route('**/rasa/**',route=>route.abort());await page.goto('/chat');await page.getByLabel('输入消息').fill('测试服务降级');await page.getByRole('button',{name:/^发送$/}).click();await expect(page.getByText('消息发送失败')).toBeVisible();await expect(page.getByRole('button',{name:'重试'})).toBeVisible()})
+test('编排与 Rasa 均不可用时聊天页可降级重试',async({page})=>{
+  await page.route('**/api/v1/orchestrator/**',route=>route.abort())
+  await page.route('**/api/v1/chat/rasa**',route=>route.abort())
+  await page.route('**/rasa/**',route=>route.abort())
+  await page.goto('/chat')
+  await page.getByLabel('输入消息').fill('测试服务降级')
+  await page.getByRole('button',{name:/^发送$/}).click()
+  await expect(page.getByText(/消息发送失败|服务暂时无法连接/)).toBeVisible({timeout:15_000})
+  await expect(page.getByRole('button',{name:'重试'})).toBeVisible()
+})
 
 test('Backend 不可用时工单页可安全降级',async({page})=>{test.skip(!password,'设置 E2E_PASSWORD 后运行真实账号工作流');await login(page,'citizen_local');await expect(page).toHaveURL(/citizen\/chat/);await page.route('**/api/v1/tickets**',route=>route.abort());await page.goto('/citizen/tickets');await expect(page.getByText('网络连接失败，请检查服务状态')).toBeVisible();await expect(page.getByRole('button',{name:'重新加载'})).toBeVisible()})
 
@@ -145,19 +163,25 @@ test.describe.serial('真实工单全状态闭环',()=>{
   let ticketId=''
 
   test('市民通过聊天创建真实诉求并查看详情',async({page})=>{
-    // r2-9: bumped timeout to 60s; global-setup pre-warms Rasa so cold start
-    // is absorbed before any test runs (Round-1 root cause #4/#8).
     test.setTimeout(120_000)
     await login(page,'citizen_local');await expect(page).toHaveURL(/citizen\/chat/)
-    await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:'新建会话'}).click()])
-    await page.getByText('我要提交一条投诉').first().click();await expect(page.getByText('请具体描述一下您的诉求。')).toBeVisible()
-    await page.getByLabel('输入消息').fill('路灯连续三晚不亮')
-    await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:/^发送$/}).click()])
-    await expect(page.getByText(/请问事情发生在哪里/)).toBeVisible({timeout:30_000})
-    await page.getByLabel('输入消息').fill('幸福路社区')
-    await Promise.all([page.waitForResponse(r=>r.url().includes('/rasa/webhooks/rest/webhook'),{timeout:60_000}),page.getByRole('button',{name:/^发送$/}).click()])
-    await expect(page.getByText(/请确认以下诉求信息/)).toBeVisible({timeout:30_000})
-    await page.getByRole('button',{name:'确认创建'}).click()
+    await page.getByRole('button',{name:'新建会话'}).click()
+    await page.getByLabel('输入消息').fill('幸福路社区路灯连续三晚不亮')
+    await Promise.all([
+      page.waitForResponse(r=>r.url().includes('/api/v1/orchestrator/chat')&&r.status()===200,{timeout:60_000}),
+      page.getByRole('button',{name:/^发送$/}).click(),
+    ])
+    await expect(page.locator('.draft-panel')).toBeVisible({timeout:30_000})
+    const submitBtn=page.getByRole('button',{name:'确认提交工单'})
+    if(!(await submitBtn.isEnabled())){
+      const pendingRow=page.locator('.draft-panel .ant-descriptions-item').filter({hasText:'待补充'}).first()
+      await pendingRow.getByRole('button').first().click()
+      const fieldInput=page.locator('.draft-panel input, .draft-panel textarea').first()
+      await fieldInput.fill('幸福路社区')
+      await fieldInput.blur()
+      await expect(submitBtn).toBeEnabled({timeout:5_000})
+    }
+    await submitBtn.click()
     const ticketCard=page.locator('.ticket-highlight').last()
     await expect(ticketCard).toContainText(/QT\d{16}/,{timeout:20_000})
     const match=(await ticketCard.textContent())?.match(/QT\d{16}/);expect(match).toBeTruthy();ticketId=match![0]

@@ -10,7 +10,11 @@ test('长对话只滚动消息区并固定左侧建议栏', async ({ page }) => 
     }))
 
     localStorage.setItem('tingting_sender_id', sender)
-    localStorage.setItem(`tingting_chat_${sender}`, JSON.stringify(messages))
+    // chatStorage requires v1 TTL envelope; bare arrays are purged as legacy.
+    localStorage.setItem(
+      `tingting_chat_${sender}`,
+      JSON.stringify({ v: 1, savedAt: Date.now(), data: messages }),
+    )
   })
 
   await page.goto('/chat')

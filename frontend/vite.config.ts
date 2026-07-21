@@ -22,5 +22,12 @@ export default defineConfig(() => ({
       if(id.includes('/rc-picker/'))return 'antd-date-runtime'
       if(id.includes('/@ant-design/icons/'))return 'antd-icons'
     }}}},
-  test: { environment: 'jsdom', setupFiles: './src/test/setup.ts', css: true, exclude: ['e2e/**', 'node_modules/**', 'dist/**'] },
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    css: true,
+    // Ant Design + jsdom mounts can exceed the 5s default on cold CI runners.
+    testTimeout: 20_000,
+    exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
+  },
 }))

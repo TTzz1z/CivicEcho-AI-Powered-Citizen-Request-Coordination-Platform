@@ -214,15 +214,39 @@ jobs:
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod config -q
       - name: Start production compose
         env:
-          COMPOSE_HTTP_TIMEOUT: "300"
-          DOCKER_CLIENT_TIMEOUT: "300"
+          COMPOSE_HTTP_TIMEOUT: "600"
+          DOCKER_CLIENT_TIMEOUT: "600"
         run: |
           set -eux
+          compose() {
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod "$@"
+          }
+          # Pre-build/pull outside `compose up` — a single up --build on GHA often hits
+          # COMPOSE_HTTP_TIMEOUT (~5m) while pip-installing the backend image.
+          docker pull pgvector/pgvector:pg16
+          docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z
           docker build -f Dockerfile.clamav-mock -t tingting-clamav-mock:ci .
+          docker build -f Dockerfile.backend -t tingting-assistant-backend .
+          docker tag tingting-assistant-backend tingting-assistant-worker
           # Core production path only (avoid full Rasa/frontend stack flakiness on runners).
-          if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build postgres minio clamav backend worker; then
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps -a || true
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=200 || true
+          if ! compose up -d --no-build postgres minio clamav; then
+            compose ps -a || true
+            compose logs --no-color --tail=200 || true
+            exit 1
+          fi
+          for i in $(seq 1 60); do
+            pg_ok=$(compose exec -T postgres pg_isready -U tingting -d tingting >/dev/null 2>&1 && echo 1 || echo 0)
+            minio_ok=$(compose exec -T minio curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && echo 1 || echo 0)
+            clam_ok=$(compose exec -T clamav python -c "import socket; s=socket.create_connection(('127.0.0.1',3310),2); s.close()" >/dev/null 2>&1 && echo 1 || echo 0)
+            if [ "$pg_ok" = "1" ] && [ "$minio_ok" = "1" ] && [ "$clam_ok" = "1" ]; then
+              echo "infra ready"
+              break
+            fi
+            sleep 3
+          done
+          if ! compose up -d --no-build --no-deps backend worker; then
+            compose ps -a || true
+            compose logs --no-color --tail=200 || true
             exit 1
           fi
       - name: Wait for core services (postgres/minio/backend)

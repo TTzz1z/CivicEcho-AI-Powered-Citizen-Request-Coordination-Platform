@@ -106,6 +106,34 @@ describe('chatStorage privacy', () => {
   })
 
   it('broadcasts multi-tab privacy clear via BroadcastChannel', async () => {
+    type Handler = (event: MessageEvent) => void
+    const channels: Array<{ name: string; handlers: Handler[]; closed: boolean }> = []
+    class FakeBroadcastChannel {
+      name: string
+      handlers: Handler[] = []
+      closed = false
+      constructor(name: string) {
+        this.name = name
+        channels.push(this)
+      }
+      postMessage(data: unknown) {
+        for (const ch of channels) {
+          if (ch === this || ch.closed || ch.name !== this.name) continue
+          for (const handler of ch.handlers) handler({ data } as MessageEvent)
+        }
+      }
+      addEventListener(_type: string, handler: Handler) {
+        this.handlers.push(handler)
+      }
+      removeEventListener(_type: string, handler: Handler) {
+        this.handlers = this.handlers.filter((h) => h !== handler)
+      }
+      close() {
+        this.closed = true
+      }
+    }
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+
     const { clearChatPrivacyStorageAndBroadcast, subscribeChatPrivacyClear, chatStorageKeys } = await import('./chatStorage')
     expect(chatStorageKeys.PRIVACY_CLEAR_SIGNAL).toBe('tingting_privacy_clear')
     expect(chatStorageKeys.PRIVACY_CHANNEL).toBe('tingting-chat-privacy')
@@ -114,9 +142,7 @@ describe('chatStorage privacy', () => {
     localStorage.setItem('tingting_chat_web-user-x', 'keep-until-clear')
     clearChatPrivacyStorageAndBroadcast()
     expect(localStorage.getItem('tingting_chat_web-user-x')).toBeNull()
-    if (typeof BroadcastChannel !== 'undefined') {
-      await vi.waitFor(() => expect(onClear).toHaveBeenCalled())
-    }
+    expect(onClear).toHaveBeenCalled()
     unsubscribe()
   })
 })

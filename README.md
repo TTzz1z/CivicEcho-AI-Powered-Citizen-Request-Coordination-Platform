@@ -158,7 +158,7 @@ helpdesk-assistant-main/
 │   │   ├── llm_client.py     # DeepSeek 客户端
 │   │   ├── embedding_client.py # SiliconFlow Embedding 客户端
 │   │   └── seed.py            # 幂等 Seed
-│   ├── migrations/versions/  # Alembic 迁移 0001-0021
+│   ├── migrations/versions/  # Alembic 迁移 0001-0022
 │   ├── scripts/              # demo_reset.py / verify_r*.py
 │   └── tests/                # pytest 用例
 ├── frontend/

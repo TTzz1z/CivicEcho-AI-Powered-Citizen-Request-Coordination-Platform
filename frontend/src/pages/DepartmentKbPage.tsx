@@ -434,8 +434,17 @@ function ChunksModal({ docId, onClose }: { docId: number; onClose: () => void })
               { title: '字符数', dataIndex: 'char_count', width: 80 },
               { title: '关键词', dataIndex: 'keywords', width: 200, ellipsis: true,
                 render: (k: string[]) => k.slice(0, 3).join('、') },
-              { title: '嵌入', dataIndex: 'has_embedding', width: 60,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
+              { title: '嵌入', dataIndex: 'embedding_status', width: 110,
+                render: (status: string | undefined, row: { has_embedding?: boolean }) => {
+                  const label = ({
+                    external: '外部向量',
+                    hash_fallback: 'hash 回退',
+                    missing: '缺失',
+                    failed: '生成失败',
+                  } as Record<string, string>)[status || ''] || (row.has_embedding ? '已有向量' : '缺失')
+                  const color = status === 'external' ? 'success' : status === 'hash_fallback' ? 'warning' : 'error'
+                  return <Tag color={color}>{label}</Tag>
+                } },
             ]}
           />
         </>

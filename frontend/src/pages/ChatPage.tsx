@@ -10,6 +10,13 @@ import type { DraftPayload, RasaMessage } from '../types'
 import { PageHeader } from '../components/PageHeader'
 import { TicketDraftPanel, type DraftState } from '../components/TicketDraftPanel'
 import { ensureChineseReply } from '../utils/languageGuard'
+import {
+  clearChatPrivacyOnAccountSwitch,
+  loadChatDraft,
+  loadChatMessages,
+  saveChatDraft,
+  saveChatMessages,
+} from '../utils/chatStorage'
 
 type ChatItem = { id: string; side: 'user' | 'bot'; text: string; route?: string; payload?: Record<string, unknown>; buttons?: { title: string; payload: string }[]; cacheHit?: boolean; degraded?: boolean; degradeReason?: string; rateLimited?: boolean; budgetExceeded?: boolean; requiresLlm?: boolean; modelTier?: string }
 const suggestions = [
@@ -25,16 +32,15 @@ export function ChatPage() {
   const { user } = useAuth(); const location = useLocation(); const isPublicChat = location.pathname === '/chat'; const isCitizen = user?.role === 'citizen'; const sender = useMemo(() => stableSender(user?.id), [user?.id]); const storageKey = `tingting_chat_${sender}`
   const draftKey = `tingting_chat_draft_${sender}`
   const screens = Grid.useBreakpoint()
-  const [messages, setMessages] = useState<ChatItem[]>(() => { try { return JSON.parse(localStorage.getItem(storageKey) || '[]') } catch { return [] } })
+  const [messages, setMessages] = useState<ChatItem[]>(() => loadChatMessages<ChatItem>(storageKey))
   const [input, setInput] = useState(''); const [sending, setSending] = useState(false); const [failed, setFailed] = useState<string | null>(null); const messagesViewport = useRef<HTMLDivElement>(null)
-  const [draft, setDraft] = useState<DraftState | null>(() => { try { const raw = localStorage.getItem(draftKey); return raw ? JSON.parse(raw) : null } catch { return null } })
+  const [draft, setDraft] = useState<DraftState | null>(() => loadChatDraft<DraftState>(draftKey))
   const [draftMissing, setDraftMissing] = useState<string[]>([])
   const [dynamicFields, setDynamicFields] = useState<Record<string, unknown>[]>([])
   const [currentRoute, setCurrentRoute] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
-  // Round 2 r2-5: per-session identifier. Fresh id per "新建会话" click so
-  // turn counters / guard buckets / ai_usage_logs are isolated per session.
-  // Persisted in sessionStorage so a page refresh keeps the same session.
+  // Per-conversation id: rotate on "新建会话" so turn counters / guards / ai_usage_logs stay isolated.
+  // Kept in sessionStorage so a refresh continues the same conversation.
   const [sessionId, setSessionId] = useState<string>(() => {
     const key = `tingting_session_${sender}`
     const existing = sessionStorage.getItem(key)
@@ -44,8 +50,17 @@ export function ChatPage() {
     return id
   })
 
-  useEffect(() => { localStorage.setItem(storageKey, JSON.stringify(messages.slice(-80))); const viewport = messagesViewport.current; viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' }) }, [messages, storageKey])
-  useEffect(() => { if (draft) localStorage.setItem(draftKey, JSON.stringify(draft)); else localStorage.removeItem(draftKey) }, [draft, draftKey])
+  const prevUserIdRef = useRef<number | undefined>(user?.id)
+  useEffect(() => {
+    const prev = prevUserIdRef.current
+    if (prev !== user?.id) {
+      clearChatPrivacyOnAccountSwitch(prev, user?.id)
+      prevUserIdRef.current = user?.id
+    }
+  }, [user?.id])
+
+  useEffect(() => { saveChatMessages(storageKey, messages); const viewport = messagesViewport.current; viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' }) }, [messages, storageKey])
+  useEffect(() => { if (draft) saveChatDraft(draftKey, draft); else localStorage.removeItem(draftKey) }, [draft, draftKey])
   useEffect(() => { if (!isCitizen) return; const anonId = localStorage.getItem('tingting_sender_id'); if (!anonId || anonId.startsWith('web-user-')) return; const boundKey = `tingting_bound_${user?.id}`; if (sessionStorage.getItem(boundKey)) return; api.post('/tickets/bind-anonymous', { sender_id: anonId }).then(() => sessionStorage.setItem(boundKey, '1')).catch(() => {}) }, [isCitizen, user?.id])
 
   const submit = async (raw = input, routeHint?: string) => {
@@ -132,8 +147,7 @@ export function ChatPage() {
   const clear = () => {
     setMessages([]); setDraft(null); setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null)
     localStorage.removeItem(storageKey); localStorage.removeItem(draftKey)
-    // Round 2 r2-5: rotate session_id so the new conversation does NOT
-    // inherit previous ticket slots / guard counters.
+    // Rotate session so the new conversation does not inherit previous ticket slots / guard counters.
     const newId = crypto.randomUUID()
     sessionStorage.setItem(`tingting_session_${sender}`, newId)
     setSessionId(newId)

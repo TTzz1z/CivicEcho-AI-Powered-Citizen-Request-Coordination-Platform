@@ -47,7 +47,7 @@ from .ai_usage_recorder import (
 logger = logging.getLogger(__name__)
 
 # --- Chinese tokenizer (jieba with regex fallback) ---
-# Round 2 r2-6: reliable Chinese word segmentation for keyword search.
+# Prefer jieba so short Chinese queries segment into searchable terms.
 # Falls back to bigram sliding-window regex if jieba is unavailable.
 try:
     import jieba  # type: ignore
@@ -559,31 +559,40 @@ class KnowledgeBaseService:
     # ====================================================================
 
     def _parse_and_index(self, doc: KbDocumentModel, principal: Optional[Principal] = None):
-        """Parse doc raw_content into chunks, embed, and store vectors."""
+        """Parse content into a staging index batch, then atomically switch live retrieval.
+
+        Live chunks (document.active_index_batch) stay searchable until the new batch
+        is fully built. Failure marks index_status=failed, deletes only the staging
+        batch, and leaves the previous live batch intact.
+        """
         if not doc.raw_content:
             doc.parse_status = "failed"
             doc.index_status = "failed"
             self.db.commit()
             return
+
+        previous_batch = doc.active_index_batch
+        has_live_index = previous_batch is not None or self.db.scalar(
+            select(KbChunkModel.id).where(KbChunkModel.document_id == doc.id).limit(1)
+        ) is not None
+
+        staging_batch = str(uuid.uuid4())
         doc.parse_status = "parsing"
         doc.index_status = "building"
         self.db.commit()
+
         try:
             chunks_text = self._split_text(doc.raw_content)
-            # Delete old chunks
-            old_chunks = list(self.db.scalars(
-                select(KbChunkModel).where(KbChunkModel.document_id == doc.id)
-            ).all())
-            for c in old_chunks:
-                self.db.delete(c)
-            self.db.flush()
+            if not chunks_text:
+                raise RuntimeError("empty_chunk_split")
 
-            # Embed all chunks in batch
             embedding_client = get_embedding_client()
             embed_results = embedding_client.embed_batch(chunks_text)
+            if len(embed_results) != len(chunks_text):
+                raise RuntimeError("embedding_batch_size_mismatch")
+
             embedding_model_used = embed_results[0].model if embed_results else None
             embedding_provider_used = _derive_embedding_provider(self.settings.embedding_base_url)
-            # P0-D: record embedding_index call with real usage / fallback status.
             total_chars = sum(len(t) for t in chunks_text)
             embed_for_log = embed_results[0] if embed_results else None
             if embed_for_log is not None:
@@ -597,13 +606,17 @@ class KnowledgeBaseService:
                     degrade_reason="embedding_fallback" if embed_for_log.fallback else None,
                 )
 
+            # Reload doc after possible mid-call commit from usage recorder.
+            doc = self.db.get(KbDocumentModel, doc.id)
+            if not doc:
+                raise RuntimeError("document_missing_during_index")
+
             for i, (chunk_text, embed_result) in enumerate(zip(chunks_text, embed_results)):
                 chunk_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()[:64]
                 keywords_list = extract_keywords(chunk_text, max_keywords=15)
-                # P0-D: classify fallback status for traceability.
                 if not embed_result.success:
                     fallback_status = "primary_failed"
-                elif embed_result.model == "fallback-hash":
+                elif embed_result.fallback or embed_result.model == "fallback-hash":
                     fallback_status = "fallback_used"
                 else:
                     fallback_status = "none"
@@ -619,29 +632,78 @@ class KnowledgeBaseService:
                     embedding_provider=embedding_provider_used,
                     embedding_dimension=embed_result.dimensions,
                     embedding_fallback=fallback_status,
+                    index_batch_id=staging_batch,
                 )
                 self.db.add(chunk)
                 self.db.flush()
-                # Store embedding via raw SQL (pgvector type)
                 if embed_result.success and embed_result.vector:
                     self._store_embedding(chunk.id, embed_result.vector)
 
+            # Atomic switch: activate staging, then drop previous live batches.
+            doc.active_index_batch = staging_batch
             doc.chunk_count = len(chunks_text)
             doc.parse_status = "done"
             doc.index_status = "ready"
             doc.embedding_model = embedding_model_used
             doc.chunking_version = "v2"
+            obsolete = list(self.db.scalars(
+                select(KbChunkModel).where(
+                    KbChunkModel.document_id == doc.id,
+                    or_(
+                        KbChunkModel.index_batch_id.is_(None),
+                        KbChunkModel.index_batch_id != staging_batch,
+                    ),
+                )
+            ).all())
+            for c in obsolete:
+                self.db.delete(c)
             self.db.commit()
         except Exception as exc:
             logger.warning("Indexing failed for doc %d: %s", doc.id, exc)
-            # flush failure puts session into rolled-back state; rollback first
-            # so we can still mark the doc as failed in a fresh transaction.
             self.db.rollback()
             failed_doc = self.db.get(KbDocumentModel, doc.id)
             if failed_doc:
-                failed_doc.parse_status = "failed"
+                staging = list(self.db.scalars(
+                    select(KbChunkModel).where(
+                        KbChunkModel.document_id == failed_doc.id,
+                        KbChunkModel.index_batch_id == staging_batch,
+                    )
+                ).all())
+                for c in staging:
+                    self.db.delete(c)
+                # Preserve live retrieval when a previous batch exists.
+                if previous_batch:
+                    failed_doc.active_index_batch = previous_batch
+                    failed_doc.parse_status = "done"
+                elif has_live_index and failed_doc.active_index_batch:
+                    failed_doc.parse_status = "done"
+                else:
+                    failed_doc.parse_status = "failed"
+                    failed_doc.active_index_batch = None
                 failed_doc.index_status = "failed"
             self.db.commit()
+
+    def _live_chunk_filter(self, doc_ids: list[int]):
+        """Restrict chunk recall to each document's active_index_batch (legacy NULL-safe)."""
+        if not doc_ids:
+            return None
+        docs = list(self.db.execute(
+            select(KbDocumentModel.id, KbDocumentModel.active_index_batch)
+            .where(KbDocumentModel.id.in_(doc_ids))
+        ).all())
+        clauses = []
+        for doc_id, batch in docs:
+            if batch:
+                clauses.append(and_(
+                    KbChunkModel.document_id == doc_id,
+                    KbChunkModel.index_batch_id == batch,
+                ))
+            else:
+                clauses.append(and_(
+                    KbChunkModel.document_id == doc_id,
+                    KbChunkModel.index_batch_id.is_(None),
+                ))
+        return or_(*clauses) if clauses else None
 
     def _store_embedding(self, chunk_id: int, vector: list[float]):
         """Store embedding vector using pgvector raw SQL."""
@@ -804,16 +866,13 @@ class KnowledgeBaseService:
         doc = self._get_doc(doc_id)
         self._require_dept_access(doc, principal, allow_admin=True, allow_view_published=True)
         from sqlalchemy import func
-        total = int(self.db.scalar(
-            select(func.count()).select_from(
-                select(KbChunkModel).where(KbChunkModel.document_id == doc_id).subquery()
-            )
-        ) or 0)
+        live = self._live_chunk_filter([doc_id])
+        base = select(KbChunkModel).where(KbChunkModel.document_id == doc_id)
+        if live is not None:
+            base = base.where(live)
+        total = int(self.db.scalar(select(func.count()).select_from(base.subquery())) or 0)
         items = list(self.db.scalars(
-            select(KbChunkModel)
-            .where(KbChunkModel.document_id == doc_id)
-            .order_by(KbChunkModel.chunk_index.asc())
-            .offset(offset).limit(limit)
+            base.order_by(KbChunkModel.chunk_index.asc()).offset(offset).limit(limit)
         ).all())
         return items, total
 
@@ -841,7 +900,14 @@ class KnowledgeBaseService:
         accessible_stmt = select(KbDocumentModel.id).where(
             KbDocumentModel.status == "PUBLISHED",
             KbDocumentModel.parse_status == "done",
-            KbDocumentModel.index_status == "ready",
+            # ready, or failed/building rebuild that still has a live batch
+            or_(
+                KbDocumentModel.index_status == "ready",
+                and_(
+                    KbDocumentModel.index_status.in_(("failed", "building")),
+                    KbDocumentModel.active_index_batch.is_not(None),
+                ),
+            ),
         )
         accessible_stmt = self._apply_visibility_filter(accessible_stmt, principal)
         # Expiry filter (default: exclude expired)
@@ -877,10 +943,8 @@ class KnowledgeBaseService:
         # Step 2: Vector recall via pgvector cosine distance.
         # Use original query for embedding (preserves semantic intent); the
         # rewritten query is only used for keyword recall below.
-        # Round 2 r2-8: when embedding falls back to pseudo vectors, do NOT
-        # silently run vector_search on hash vectors (semantically meaningless).
-        # Skip vector recall and rely on keyword recall instead; the fallback
-        # is still recorded in ai_usage_logs with degrade_reason=embedding_fallback.
+        # When embedding falls back to pseudo vectors, skip vector_search and
+        # rely on keyword recall; still record embedding_fallback in ai_usage_logs.
         vector_hits: list[tuple[float, int]] = []  # (score, chunk_id)
         embedding_client = get_embedding_client()
         embed_result = embedding_client.embed(query)
@@ -950,33 +1014,35 @@ class KnowledgeBaseService:
         if not doc_ids:
             return []
         vec_str = "[" + ",".join(f"{v:.8f}" for v in query_vec) + "]"
-        # Cosine distance: 1 - cosine similarity. We convert to similarity score.
+        # Join documents so only active_index_batch chunks are recalled.
         sql = text("""
-            SELECT id, 1 - (embedding <=> CAST(:vec AS vector)) AS score
-            FROM kb_chunks
-            WHERE document_id = ANY(:doc_ids)
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:vec AS vector)
+            SELECT c.id, 1 - (c.embedding <=> CAST(:vec AS vector)) AS score
+            FROM kb_chunks c
+            JOIN kb_documents d ON d.id = c.document_id
+            WHERE c.document_id = ANY(:doc_ids)
+              AND c.embedding IS NOT NULL
+              AND (
+                (d.active_index_batch IS NOT NULL AND c.index_batch_id = d.active_index_batch)
+                OR (d.active_index_batch IS NULL AND c.index_batch_id IS NULL)
+              )
+            ORDER BY c.embedding <=> CAST(:vec AS vector)
             LIMIT :k
         """)
         rows = self.db.execute(sql, {"vec": vec_str, "doc_ids": doc_ids, "k": k}).all()
         return [(float(row.score), int(row.id)) for row in rows if row.score is not None]
 
     def _keyword_search(self, query: str, doc_ids: list[int], k: int) -> list[tuple[float, int]]:
-        """Keyword overlap search across chunks of accessible docs.
-
-        Round 2 r2-6: uses jieba-based _tokenize_zh for reliable Chinese
-        word segmentation (was: naive regex extraction that treated "路灯坏了"
-        as a single token and missed all matches).
-        """
+        """Keyword overlap search across live chunks of accessible docs."""
         if not doc_ids:
             return []
         query_terms = set(_tokenize_zh(query))
         if not query_terms:
             return []
-        # Pull candidate chunks (limit to keep memory bounded)
-        stmt = select(KbChunkModel).where(KbChunkModel.document_id.in_(doc_ids)) \
-            .execution_options(stream_results=True)
+        live = self._live_chunk_filter(doc_ids)
+        stmt = select(KbChunkModel).where(KbChunkModel.document_id.in_(doc_ids))
+        if live is not None:
+            stmt = stmt.where(live)
+        stmt = stmt.execution_options(stream_results=True)
         chunks = list(self.db.scalars(stmt).all()[:500])
         scored: list[tuple[float, int]] = []
         for chunk in chunks:
@@ -986,7 +1052,6 @@ class KnowledgeBaseService:
             overlap = len(query_terms & chunk_terms)
             if overlap == 0:
                 continue
-            # Jaccard-like score
             score = overlap / max(1, len(query_terms | chunk_terms))
             scored.append((score, chunk.id))
         scored.sort(key=lambda x: x[0], reverse=True)

@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Descriptions, Divider, Form, Input, Modal, Select, Space, Switch, Timeline, Typography, message } from 'antd'
+import { Alert, Button, Card, Collapse, Descriptions, Divider, Form, Input, Modal, Select, Space, Switch, Timeline, Typography, message } from 'antd'
 import { BellOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined, EditOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
@@ -46,10 +46,10 @@ const reasonLabels:Record<string,string> = {
 }
 
 export function allowedActions(role:string|undefined,status:string):Action[] {
-  // P0-A: admin only handles exceptions (close/force-reopen); does not participate in normal resolve.
+  // Admin handles exceptions (close/force paths); normal resolve stays with agent/department flow.
   if(role==='admin') return status==='pending'?['accept','reject','remind']:status==='accepted'?['assign','pause_sla','remind']:status==='assigned'?['process','pause_sla','remind']:status==='processing'?['pause_sla','remind']:status==='resolved'?['close','process']:[]
   if(role==='agent') return status==='pending'?['accept','reject','contact','remind']:status==='accepted'?['assign','contact','remind']:[]
-  // P0-A: department_staff cannot self-resolve; summary submission moves to WorkOrderPanel.
+  // Department staff submit results via WorkOrderPanel; they do not self-resolve the parent ticket.
   if(role==='department_staff') return status==='assigned'?['process','pause_sla','remind']:status==='processing'?['note','pause_sla','remind']:[]
   if(role==='citizen') return ['pending','accepted','assigned','processing'].includes(status)?(['pending','accepted'].includes(status)?['contact','remind']:['remind']):status==='resolved'?['feedback']:[]
   return []
@@ -90,10 +90,29 @@ export function TicketDetailPage(){
   if(user?.role==='citizen'&&t.collaboration_status==='awaiting_citizen')actions=['submit_supplement',...actions.filter(a=>a!=='contact')]
   const openAction=(action:Action)=>{form.resetFields();if(action==='feedback')form.setFieldsValue({rating:'satisfied'});if(action==='reject')form.setFieldsValue({needs_supplement:false});if(action==='accept')form.setFieldsValue({priority:'normal'});if(action==='assign'){const category=categories.data?.find(c=>c.id===t.category_id);form.setFieldsValue({department_id:category?.default_department_id||undefined})}setActive(action)}
   const actionLabel=(action:Action)=>action==='process'&&t.status==='resolved'?'退回重新办理':labels[action]
+  const latestHistory=[...t.history].sort((a,b)=>dayjs(b.created_at).valueOf()-dayjs(a.created_at).valueOf())[0]
+  const slaMessage=({overdue:'已超时',due_soon:'即将超时',paused:'计时已暂停',on_track:'时限正常'} as Record<string,string>)[t.sla_state]
+  const slaDetail=t.sla_paused_at?`暂停原因：${t.sla_pause_reason}`:t.remaining_seconds!=null?`${t.remaining_seconds<0?'超出':'剩余'} ${Math.floor(Math.abs(t.remaining_seconds)/3600)} 小时 ${Math.floor(Math.abs(t.remaining_seconds)%3600/60)} 分钟`:'暂无截止时间'
   return <>
     <PageHeader eyebrow="TICKET DETAIL" title={t.ticket_id} description={`版本 ${t.version} · 最后更新 ${dayjs(t.updated_at).format('YYYY-MM-DD HH:mm')}`} extra={<Space><Button onClick={()=>nav(-1)}>返回列表</Button><TicketStatusTag status={t.status} label={t.status_label}/></Space>}/>
     {t.collaboration_status==='awaiting_citizen'&&<Alert showIcon type="warning" message="工单正在等待市民补充材料" description={t.supplement_reason} style={{marginBottom:20}}/>}
-    {actions.length>0&&<Card className="surface" style={{marginBottom:20}}><div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{actionLabel(a)}</Button>)}</div></Card>}
+
+    <Card className="surface detail-card" style={{marginBottom:20}} title="办理焦点">
+      <Descriptions column={{xs:1,sm:2,md:3}} items={[
+        {key:'status',label:'当前状态',children:<TicketStatusTag status={t.status} label={t.status_label}/>},
+        {key:'department',label:'责任部门',children:t.department_name||'待派发'},
+        {key:'assignee',label:'承办坐席/人员',children:t.assignee_name||'未指定'},
+        {key:'sla',label:'SLA',children:<span>{slaMessage} · {slaDetail}</span>},
+        {key:'round',label:'当前办理轮次',children:t.handling_round>1?`第 ${t.handling_round} 轮（重新办理）`:'第 1 轮'},
+        {key:'latest',label:'最新办理结果',children:t.resolution_summary||t.public_reply||latestHistory?.content||latestHistory?.remark||'暂无结果'},
+      ]}/>
+      {actions.length>0&&<>
+        <Divider style={{margin:'16px 0'}}/>
+        <Typography.Text type="secondary" style={{display:'block',marginBottom:8}}>下一步可执行操作</Typography.Text>
+        <div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{actionLabel(a)}</Button>)}</div>
+      </>}
+    </Card>
+
     <div className="detail-grid"><div>
       <Card title="诉求内容" className="surface detail-card"><div className="description-block">{t.description}</div><Divider/><Descriptions column={{xs:1,sm:2}} items={[
         {key:'type',label:'诉求类型',children:t.request_type},{key:'category',label:'三级分类',children:t.category_path||'待坐席确认'},
@@ -115,11 +134,38 @@ export function TicketDetailPage(){
         {key:'supplement',label:'需要补充材料',children:t.needs_supplement?'是':'否'},
       ]}/></Card>}
       {t.feedbacks.length>0&&<Card title="市民反馈" className="surface detail-card" style={{marginTop:20}}><Timeline items={t.feedbacks.slice().reverse().map(f=>({color:f.result==='closed'?'green':'orange',children:<div><b>{ratingLabels[f.rating]} · {f.result==='closed'?'确认办结':'申请重办'}</b>{f.comment&&<div style={{marginTop:4}}>{f.comment}</div>}<div style={{color:'#647680',fontSize:13,marginTop:4}}>{dayjs(f.created_at).format('YYYY-MM-DD HH:mm:ss')}</div></div>}))}/></Card>}
-      <WorkOrderPanel ticket={t} user={user!} onChanged={()=>{void qc.invalidateQueries({queryKey:ticketKeys.all});void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})}}/>
-      <AttachmentPanel ticketId={t.ticket_id} status={t.status} user={user}/>
-      {user && ['department_staff','agent','admin'].includes(user.role) && <AiCaseAssistant ticket={t} />}
-      <Card title="办理记录" className="surface detail-card" style={{marginTop:20}}>{t.history.length?<Timeline items={t.history.slice().reverse().map(h=>({color:h.current_status==='closed'?'green':'blue',children:<div><b>{h.content||h.remark||h.operation_type}</b><div style={{color:'#647680',fontSize:13,marginTop:4}}>{dayjs(h.created_at).format('YYYY-MM-DD HH:mm:ss')} · {h.previous_status?`${h.previous_status} → `:''}{h.current_status}</div></div>}))}/>:<Alert type="info" message="暂无办理记录"/>}</Card>
-    </div><aside><Card title="SLA 时限" className={`surface detail-card sla-card ${t.sla_state}`}><Alert showIcon type={t.sla_state==='overdue'?'error':t.sla_state==='due_soon'?'warning':t.sla_state==='paused'?'info':'success'} message={({overdue:'已超时',due_soon:'即将超时',paused:'计时已暂停',on_track:'时限正常'} as Record<string,string>)[t.sla_state]} description={t.sla_paused_at?`暂停原因：${t.sla_pause_reason}`:t.remaining_seconds!=null?`${t.remaining_seconds<0?'超出':'剩余'} ${Math.floor(Math.abs(t.remaining_seconds)/3600)} 小时 ${Math.floor(Math.abs(t.remaining_seconds)%3600/60)} 分钟`:'暂无截止时间'}/><Descriptions style={{marginTop:16}} column={1} items={[
+
+      <WorkOrderPanel ticket={t} user={user!} onChanged={()=>{void qc.invalidateQueries({queryKey:ticketKeys.all});void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})}} collapseCompleted/>
+
+      <Collapse
+        className="surface detail-card"
+        style={{marginTop:20,background:'#fff'}}
+        items={[
+          {
+            key:'history',
+            label:'完整状态历史',
+            children: t.history.length
+              ? <Timeline items={t.history.slice().reverse().map(h=>({color:h.current_status==='closed'?'green':'blue',children:<div><b>{h.content||h.remark||h.operation_type}</b><div style={{color:'#647680',fontSize:13,marginTop:4}}>{dayjs(h.created_at).format('YYYY-MM-DD HH:mm:ss')} · {h.previous_status?`${h.previous_status} → `:''}{h.current_status}</div></div>}))}/>
+              : <Alert type="info" message="暂无办理记录"/>,
+          },
+          {
+            key:'audit',
+            label:'审计记录（办理轨迹）',
+            children: <Alert type="info" showIcon message="工单级审计以状态历史与操作备注为准；系统级审计日志请在管理后台“审计”中按工单号检索。"/>,
+          },
+          {
+            key:'attachments',
+            label:'附件材料',
+            children: <AttachmentPanel ticketId={t.ticket_id} status={t.status} user={user}/>,
+          },
+          ...(user && ['department_staff','agent','admin'].includes(user.role) ? [{
+            key:'ai',
+            label:'AI 调用与办件建议',
+            children: <AiCaseAssistant ticket={t} />,
+          }] : []),
+        ]}
+      />
+    </div><aside><Card title="SLA 时限" className={`surface detail-card sla-card ${t.sla_state}`}><Alert showIcon type={t.sla_state==='overdue'?'error':t.sla_state==='due_soon'?'warning':t.sla_state==='paused'?'info':'success'} message={slaMessage} description={slaDetail}/><Descriptions style={{marginTop:16}} column={1} items={[
       {key:'accept_due',label:'应受理时间',children:t.accept_due_at?dayjs(t.accept_due_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'resolve_due',label:'应办结时间',children:t.resolve_due_at?dayjs(t.resolve_due_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'actual_accept',label:'实际受理时间',children:t.accepted_at?dayjs(t.accepted_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'actual_close',label:'实际办结时间',children:t.closed_at?dayjs(t.closed_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'paused',label:'累计暂停',children:`${Math.floor(t.total_paused_seconds/60)} 分钟`},{key:'reminders',label:'催办次数',children:`${t.reminder_count} 次`},
     ]}/></Card><Card title="办理信息" className="surface detail-card" style={{marginTop:20}}><Descriptions column={1} items={[
       {key:'status',label:'当前状态',children:<TicketStatusTag status={t.status}/>},{key:'department',label:'责任部门',children:t.department_name||'待派发'},

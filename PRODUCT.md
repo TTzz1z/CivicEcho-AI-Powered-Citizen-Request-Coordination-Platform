@@ -77,13 +77,20 @@
   → 触发 AI 助手（ticket_advice / pre_review / ai_analyze）
   → LLM 生成摘要、风险提示、责任部门建议、文书草稿
   → 写入 ai_suggestions 表（advisory_only=true，不动 ticket.status）
-  → 工作人员三态人工确认：accept / reject / modify
-  → accept：将建议内容作为正式答复草稿，仍需人工提交 close 动作
-  → reject：建议丢弃，仍由人工处理
-  → modify：人工修改后作为草稿
+  → 工作人员三态人工确认：adopted / adopted_with_edits / rejected
+  → adopted：将建议内容作为正式答复草稿，仍需人工提交办结动作
+  → rejected：建议丢弃，仍由人工处理
+  → adopted_with_edits：人工修改后作为草稿
 ```
 
 AI 永远不直接调用 `accept`/`assign`/`resolve`/`close` 等状态变更接口。
+
+**两类审核不要混淆：**
+
+| 类型 | 入口 | 作用 | 是否改工单状态 |
+|---|---|---|---|
+| 通用 AI Suggestion 审核 | 情报/预审等 suggestion 能力 | 对模型输出做采用/修改/驳回记录 | 否 |
+| 工作人员 KB 办件审核 | `/api/v1/kb/tickets/{id}/advice/review` | 对 ticket_advice 建议做三态确认并落审计 | 否（办结仍走工单动作） |
 
 ## 工单状态机图
 
@@ -126,13 +133,14 @@ stateDiagram-v2
 
 所有降级路径统一写入 `ai_usage_logs`，`degraded=true` + `degrade_reason` 标注原因，管理员可在 AI 用量页清晰区分真实调用与降级调用。
 
-## 本轮范围与非目标
+## 已完成能力边界与非目标
 
-已完成三轮开发：
+现行能力基线（详见代码与 CI）：
 
-- **Round 1 业务闭环**：状态机、权限、SLA、通知、申诉、回访。
-- **Round 2 AI 可信度**：`ai_usage_logs` 审计链路、policy_rag 不建单、service_guide 接 RAG、多意图、session 隔离、三态确认、降级标记。
-- **Round 3 验收取口**：真实 Token 证据、session_id 筛选、引用字段完整、演示环境、全量测试、文档。
+- 业务闭环：状态机、权限、SLA、通知、申诉、回访。
+- AI 可信度：`ai_usage_logs` 审计链路、policy_rag 不建单、service_guide 接 RAG、多意图、session 隔离、三态确认、降级标记。
+- 知识库索引：重建失败时保留旧索引；成功后原子切换，避免已发布政策短暂不可检索。
+- 可复现验收：真实 Token 证据、引用字段完整、演示环境、全量测试与文档。
 
 不做 Kubernetes、多机高可用、跨机房灾备、复杂 BPMN、多租户 SaaS、原生 App/小程序、自动电话外呼，以及自动行政决策、自动拒绝、自动派发或自动办结。不训练或微调模型。
 

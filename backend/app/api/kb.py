@@ -215,6 +215,7 @@ def _chunk_to_dict(chunk) -> dict:
             keywords = _json.loads(chunk.keywords)
         except Exception:
             keywords = []
+    embedding_status = _embedding_status(chunk)
     return {
         "id": chunk.id,
         "document_id": chunk.document_id,
@@ -224,13 +225,42 @@ def _chunk_to_dict(chunk) -> dict:
         "token_count": chunk.token_count,
         "chunk_hash": chunk.chunk_hash,
         "keywords": keywords,
-        "has_embedding": True,  # ORM cannot reliably read pgvector column; assume set
+        "has_embedding": embedding_status in {"external", "hash_fallback"},
+        "embedding_status": embedding_status,
         "embedding_model": chunk.embedding_model,
         "embedding_provider": chunk.embedding_provider,
         "embedding_dimension": chunk.embedding_dimension,
         "embedding_fallback": chunk.embedding_fallback,
+        "index_batch_id": chunk.index_batch_id,
         "created_at": chunk.created_at.isoformat() if chunk.created_at else None,
     }
+
+
+def _embedding_status(chunk) -> str:
+    """Classify chunk vector state for admin visibility.
+
+    external | hash_fallback | missing | failed
+    """
+    fallback = (chunk.embedding_fallback or "none").lower()
+    if fallback == "primary_failed":
+        return "failed"
+    has_vector = False
+    try:
+        vec = getattr(chunk, "embedding", None)
+        has_vector = bool(vec is not None and len(vec) > 0)
+    except Exception:
+        has_vector = False
+    if not has_vector:
+        # ORM may not load pgvector; fall back to metadata signals.
+        if fallback == "fallback_used":
+            return "hash_fallback"
+        if chunk.embedding_model and chunk.embedding_model != "fallback-hash" and fallback == "none":
+            # Vector write was attempted; verify via SQL when possible.
+            return "missing"
+        return "missing"
+    if fallback == "fallback_used" or chunk.embedding_model == "fallback-hash":
+        return "hash_fallback"
+    return "external"
 
 
 def _feedback_to_dict(fb) -> dict:

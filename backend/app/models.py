@@ -554,6 +554,8 @@ class KbDocumentModel(Base):
     index_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # pending/building/ready/failed
     embedding_model: Mapped[Optional[str]] = mapped_column(String(128))
     chunking_version: Mapped[Optional[str]] = mapped_column(String(32), default="v1")
+    # Live retrieval batch. Rebuild writes a new batch first; switch only on full success.
+    active_index_batch: Mapped[Optional[str]] = mapped_column(String(64))
     published_department_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("departments.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -570,6 +572,7 @@ class KbDocumentModel(Base):
         Index("ix_kb_docs_index_status", "index_status"),
         Index("ix_kb_docs_replaces", "replaces_doc_id"),
         Index("ix_kb_docs_published_dept", "published_department_id"),
+        Index("ix_kb_docs_active_index_batch", "active_index_batch"),
     )
 
 
@@ -593,6 +596,8 @@ class KbChunkModel(Base):
     embedding_provider: Mapped[Optional[str]] = mapped_column(String(64))
     embedding_dimension: Mapped[Optional[int]] = mapped_column(Integer)
     embedding_fallback: Mapped[str] = mapped_column(String(32), nullable=False, default="none")  # none/fallback_used/primary_failed
+    # Staging vs live: only chunks matching document.active_index_batch are searchable.
+    index_batch_id: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     document: Mapped[KbDocumentModel] = relationship(back_populates="chunks")
@@ -600,6 +605,7 @@ class KbChunkModel(Base):
     __table_args__ = (
         Index("ix_kb_chunks_doc_idx", "document_id", "chunk_index"),
         Index("ix_kb_chunks_doc_idx_hash", "document_id", "chunk_hash"),
+        Index("ix_kb_chunks_doc_batch", "document_id", "index_batch_id"),
     )
 
 

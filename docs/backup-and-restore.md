@@ -10,6 +10,8 @@
 
 备份文件应加密保存到访问受控的介质，并定期校验可恢复性。Docker Volume 不是备份；删除 Volume、磁盘损坏或错误迁移都会影响其中数据。
 
+**范围说明：`scripts/backup-database.ps1` 只备份 PostgreSQL（含工单、知识库元数据与向量），不包含 MinIO 对象存储中的附件与原文文件。附件灾备需另行备份 MinIO bucket / volume。**
+
 ## 恢复
 
 ```powershell

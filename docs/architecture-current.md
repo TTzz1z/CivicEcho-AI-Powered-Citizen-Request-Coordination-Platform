@@ -19,7 +19,7 @@ flowchart LR
 - Rasa 负责 NLU、tracker、策略和表单，不作为工单真相源。
 - Action Server 负责对话适配；中文创建/查询通过 HTTP gateway 调用 Backend。
 - Backend 集中处理身份、四角色授权、状态机、幂等、乐观锁、时间标准化和审计。
-- PostgreSQL 保存用户、部门、工单、状态历史、市民评价、AI 建议、集成事件和审计；Alembic 当前为 `0021 (head)`。
+- PostgreSQL 保存用户、部门、工单、状态历史、市民评价、AI 建议、集成事件和审计；Alembic 当前为 `0022 (head)`。
 - Nginx 是浏览器唯一入口，代理 `/api/` 与 `/rasa/`，并设置请求体、超时和安全响应头。
 
 ## 配置边界

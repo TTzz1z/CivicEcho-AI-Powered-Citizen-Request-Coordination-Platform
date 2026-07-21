@@ -61,7 +61,7 @@ export function LandingPage() {
             <Link to="/login"><Button size="large">账号登录 <ArrowRightOutlined /></Button></Link>
           </div>
           <p className="visitor-hint">
-            访客工单不会自动绑定后续登录账号;需要在"我的工单"中持续查看,请先登录市民账号。
+            登录市民账号后，系统会尝试将本浏览器中的访客会话工单绑定到该账号；若需全程在“我的工单”跟踪，建议先登录再提交。
           </p>
 
           <Collapse

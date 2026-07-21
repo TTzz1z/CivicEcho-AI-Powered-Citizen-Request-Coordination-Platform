@@ -3,12 +3,13 @@ import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from .database import SessionLocal
 from .models import (
     AuditLogModel,
     DepartmentModel,
+    KbChunkModel,
     KbDocumentModel,
     KbEvalCaseModel,
     TicketModel,
@@ -1134,7 +1135,9 @@ def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[
     import json as _json
     import logging
 
-    from .models import KbChunkModel
+    from .models import (
+        KbChunkModel,
+    )
 
     logger = logging.getLogger(__name__)
     now = datetime.now(timezone.utc)
@@ -1268,10 +1271,27 @@ def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[
     except Exception as exc:
         logger.warning("Seed KB indexing skipped: %s", exc)
 
-    # Clean up chunks for docs that ended up un-indexed (avoid stale partial chunks)
+    # Clean up only orphan staging batches; never wipe a live active_index_batch.
     for key, doc_id in doc_ids.items():
         doc = db.get(KbDocumentModel, doc_id)
-        if doc and doc.index_status != "ready":
+        if not doc:
+            continue
+        if doc.active_index_batch:
+            stale = list(db.scalars(select(KbChunkModel).where(
+                KbChunkModel.document_id == doc_id,
+                or_(
+                    KbChunkModel.index_batch_id.is_(None),
+                    KbChunkModel.index_batch_id != doc.active_index_batch,
+                ),
+            )).all())
+            for c in stale:
+                db.delete(c)
+            live_count = len(list(db.scalars(select(KbChunkModel).where(
+                KbChunkModel.document_id == doc_id,
+                KbChunkModel.index_batch_id == doc.active_index_batch,
+            )).all()))
+            doc.chunk_count = live_count
+        elif doc.index_status != "ready":
             stale = list(db.scalars(select(KbChunkModel).where(KbChunkModel.document_id == doc_id)).all())
             for c in stale:
                 db.delete(c)

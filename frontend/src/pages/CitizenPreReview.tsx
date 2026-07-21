@@ -8,6 +8,7 @@ import { preReview, type PreReviewData } from '../api/intelligence'
 import { createTicket } from '../api/tickets'
 import { ApiError } from '../api/client'
 import { PageHeader } from '../components/PageHeader'
+import { loadChatDraft, saveChatDraft } from '../utils/chatStorage'
 
 const { TextArea } = Input
 const REQUEST_TYPES = ['投诉', '建议', '咨询', '求助']
@@ -32,18 +33,13 @@ export function CitizenPreReview() {
   const [useNormalized, setUseNormalized] = useState(true)
   const draftKey = `tingting_pre_review_draft_${user?.id}`
 
-  // Restore draft on mount
+  // Restore draft on mount (TTL + contact stripped)
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(draftKey)
-      if (raw) {
-        const draft: DraftState = JSON.parse(raw)
-        if (draft.description) {
-          form.setFieldsValue(draft)
-          message.info('已恢复上次未提交的草稿')
-        }
-      }
-    } catch { /* ignore */ }
+    const draft = loadChatDraft<DraftState>(draftKey)
+    if (draft?.description) {
+      form.setFieldsValue(draft)
+      message.info('已恢复上次未提交的草稿')
+    }
   }, [draftKey, form])
 
   const analyze = useMutation({
@@ -95,8 +91,8 @@ export function CitizenPreReview() {
 
   const saveDraft = () => {
     const values = form.getFieldsValue()
-    localStorage.setItem(draftKey, JSON.stringify(values))
-    message.success('草稿已保存到本地')
+    saveChatDraft(draftKey, values)
+    message.success('草稿已保存到本地（联系方式不会长期保存）')
   }
 
   const startEdit = (field: string) => setEditing(prev => ({ ...prev, [field]: true }))

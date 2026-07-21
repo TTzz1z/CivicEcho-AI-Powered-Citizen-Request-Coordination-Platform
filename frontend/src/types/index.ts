@@ -142,7 +142,13 @@ export interface KbChunk {
   id: number; document_id: number; chunk_index: number
   content: string; char_count: number; token_count: number
   chunk_hash?: string | null; keywords: string[]
-  has_embedding: boolean; created_at?: string | null
+  has_embedding: boolean
+  embedding_status?: 'external' | 'hash_fallback' | 'missing' | 'failed'
+  embedding_model?: string | null
+  embedding_provider?: string | null
+  embedding_dimension?: number | null
+  embedding_fallback?: string | null
+  created_at?: string | null
 }
 export interface KbChunkPage { items: KbChunk[]; total: number; page: number; page_size: number }
 

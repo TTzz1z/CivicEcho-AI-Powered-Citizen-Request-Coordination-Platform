@@ -1,16 +1,16 @@
 """Orchestrator API endpoint - unified entry point for citizen chat messages."""
-from dataclasses import asdict
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..authorization import Principal
 from ..database import get_db
 from ..schemas import SuccessResponse
+from ..services.language_guard import ensure_chinese_response
 from ..services.orchestrator_service import get_orchestrator
-from .dependencies import get_current_principal
+from .dependencies import get_optional_principal
 
 router = APIRouter(prefix="/api/v1/orchestrator", tags=["orchestrator"])
 
@@ -53,24 +53,44 @@ class OrchestratorResponse(BaseModel):
 @router.post("/chat", response_model=SuccessResponse[OrchestratorResponse])
 def orchestrator_chat(
     payload: OrchestratorRequest,
-    principal: Principal = Depends(get_current_principal),
+    request: Request,
+    principal: Principal = Depends(get_optional_principal),
     db: Session = Depends(get_db),
 ):
-    """Process a citizen message through the unified orchestrator."""
+    """Process a citizen message through the unified orchestrator.
+
+    Visitors (no token) are allowed — rate/budget limits still apply via Guard.
+    """
     orchestrator = get_orchestrator()
 
+    client_ip = request.client.host if request.client else "anon"
     # Build user context from principal
-    user_context = {
-        "user_id": principal.user_id if principal.kind == "user" else None,
-        "role": principal.role if principal.kind == "user" else "anonymous",
-        "contact": "",  # Will be populated from user profile if available
-    }
+    if principal.kind == "user":
+        user_context = {
+            "user_id": principal.user_id,
+            "role": principal.role,
+            "contact": "",
+            "ip": client_ip,
+        }
+    else:
+        user_context = {
+            "user_id": None,
+            "role": "anonymous",
+            "contact": "",
+            "ip": client_ip,
+        }
     if payload.session_context:
         user_context.update(payload.session_context)
 
     result = orchestrator.process(payload.message, user_context, payload.route_hint,
                                   db=db, principal=principal,
                                   session_id=payload.session_id)
+
+    # Defense-in-depth: never return non-Chinese citizen-facing text
+    message = ensure_chinese_response(result.message, source="orchestrator")
+    clarify = result.clarify_question
+    if clarify:
+        clarify = ensure_chinese_response(clarify, source="orchestrator_clarify")
 
     return SuccessResponse(data=OrchestratorResponse(
         primary_intent=result.primary_intent,
@@ -86,8 +106,8 @@ def orchestrator_chat(
         routing_reason=result.routing_reason,
         should_create_ticket=result.should_create_ticket,
         should_clarify=result.should_clarify,
-        clarify_question=result.clarify_question,
-        message=result.message,
+        clarify_question=clarify,
+        message=message,
         payload=result.payload,
         cache_hit=result.cache_hit,
         degraded=result.degraded,

@@ -39,6 +39,7 @@ from .ai_usage_recorder import (
     CAP_SERVICE_GUIDE,
     CAP_TICKET_DRAFT,
 )
+from .language_guard import ensure_chinese_response
 from .orchestrator_guard import (
     GuardDecision,
     OrchestratorGuard,
@@ -69,7 +70,11 @@ COST_LEVEL_HIGH = "high"        # llm_full (policy / service guide answer)
 
 # --- Rule-based detection patterns ---
 TICKET_ID_RE = re.compile(r"QT\d{12,16}", re.IGNORECASE)
-EMERGENCY_WORDS = ("火灾", "爆炸", "坍塌", "有人受伤", "生命危险", "触电", "溺水", "中毒", "自杀", "持刀", "行凶")
+EMERGENCY_WORDS = (
+    "火灾", "爆炸", "坍塌", "有人受伤", "生命危险", "触电", "溺水", "中毒", "自杀", "持刀", "行凶",
+    # 走失/失踪类：引导立即报警，不当成功能说明或普通工单
+    "走失", "失踪", "下落不明", "没回家", "未回家", "找不到人", "孩子不见", "小孩不见", "老人走失",
+)
 POLICY_WORDS = ("政策", "补贴", "福利", "待遇", "社保", "公积金", "入学", "落户", "人才", "博士", "硕士", "低保", "医保", "养老", "残疾", "优抚", "退伍", "军人")
 SERVICE_GUIDE_WORDS = ("怎么办", "如何办理", "需要什么材料", "去哪里办", "办理流程", "办理条件", "需要什么证件", "怎么申请", "如何申请", "在哪办", "手续")
 SUGGESTION_WORDS = ("建议", "希望增加", "应该", "能不能", "是否可以增加", "改善", "优化")
@@ -77,7 +82,13 @@ PROGRESS_WORDS = ("进度", "处理到哪", "办到哪了", "什么时候", "查
 DEPT_NAV_WORDS = ("找哪个部门", "哪个部门管", "归谁管", "不知道找谁", "该找谁", "哪个窗口")
 HANDOFF_WORDS = ("转人工", "人工服务", "找人工", "要真人", "投诉你们", "态度差")
 GREET_WORDS = ("你好", "您好", "在吗", "谢谢", "感谢", "再见", "拜拜", "早上好", "下午好", "晚上好")
-HELP_WORDS = ("help", "帮助", "怎么用", "能做什么", "功能")
+# 仅「能力说明」问法；禁止裸「帮助/求助」命中真实诉求长句
+HELP_EXACT = ("help", "帮助", "功能", "怎么用", "帮助一下")
+HELP_CAPABILITY_WORDS = (
+    "怎么用", "能做什么", "能干啥", "能干什么", "你会什么", "你可以做什么",
+    "有什么功能", "有哪些功能", "你能干嘛", "你会干啥", "可以做什么", "做什么用",
+    "你是做什么的", "介绍一下你的功能",
+)
 
 # User explicitly confirms creating a consultation ticket (after policy_rag no-evidence).
 # Only such explicit confirmation may trigger ticket_intake for a consultation.
@@ -204,6 +215,24 @@ class OrchestratorService:
                 db: Optional[Session] = None, principal: Optional[Principal] = None,
                 session_id: Optional[str] = None) -> OrchestratorResult:
         """Main entry: process a citizen message and return routing decision + response."""
+        return self._enforce_language(self._process_inner(
+            message, user_context, route_hint, db=db, principal=principal,
+            session_id=session_id,
+        ))
+
+    def _enforce_language(self, result: OrchestratorResult) -> OrchestratorResult:
+        """Strip any English residue before the result leaves the service."""
+        result.message = ensure_chinese_response(result.message, source="orchestrator_service")
+        if result.clarify_question:
+            result.clarify_question = ensure_chinese_response(
+                result.clarify_question, source="orchestrator_clarify",
+            )
+        return result
+
+    def _process_inner(self, message: str, user_context: dict, route_hint: Optional[str] = None,
+                       db: Optional[Session] = None, principal: Optional[Principal] = None,
+                       session_id: Optional[str] = None) -> OrchestratorResult:
+        """Inner pipeline without language post-filter."""
         text = (message or "").strip()
         request_id = request_id_context.get() or uuid.uuid4().hex
         user_key = self._user_key(user_context)
@@ -392,8 +421,8 @@ class OrchestratorService:
                 routing_reason="问候关键词命中",
             )
 
-        # Help / 能做什么
-        if any(w in text.lower() for w in HELP_WORDS) and len(text) <= 20:
+        # Help / 能做什么 — 仅能力问询，避免「寻求帮助」等真实诉求误入
+        if self._is_capability_help_query(text):
             return OrchestratorResult(
                 primary_intent="help", route="general_chat", confidence=0.95,
                 message=HELP_MESSAGE,
@@ -697,14 +726,28 @@ class OrchestratorService:
         route = result.route
 
         if route == "emergency_route":
-            result.message = (
-                "检测到您的描述可能涉及紧急情况。请注意：\n"
-                "1. 如有人身危险，请立即拨打 110 或 120\n"
-                "2. 如涉及火灾，请拨打 119\n"
-                "3. 如涉及燃气泄漏，请远离现场并拨打燃气公司电话\n\n"
-                "在确保安全后，我可以帮您生成工单草稿由相关部门跟进。是否需要？"
+            flags = result.sensitive_flags or []
+            missing_person = any(
+                w in flags or w in text
+                for w in ("走失", "失踪", "下落不明", "没回家", "未回家", "找不到人", "孩子不见", "小孩不见", "老人走失")
             )
-            result.payload = {"emergency_type": "、".join(result.sensitive_flags), "can_create_ticket": True}
+            if missing_person:
+                result.message = (
+                    "您描述的情况可能涉及人员走失或失联，请优先保障安全并立即求助：\n"
+                    "1. 请立即拨打 110 报警，说明走失时间、地点和特征\n"
+                    "2. 可同步联系学校、监护人或附近派出所\n"
+                    "3. 非紧急政务咨询可拨打 12345\n\n"
+                    "本平台不能替代报警。在报警后，如需形成书面记录由相关部门跟进，我可以帮您起草工单草稿。是否需要？"
+                )
+            else:
+                result.message = (
+                    "检测到您的描述可能涉及紧急情况。请注意：\n"
+                    "1. 如有人身危险，请立即拨打 110 或 120\n"
+                    "2. 如涉及火灾，请拨打 119\n"
+                    "3. 如涉及燃气泄漏，请远离现场并拨打燃气公司电话\n\n"
+                    "在确保安全后，我可以帮您生成工单草稿由相关部门跟进。是否需要？"
+                )
+            result.payload = {"emergency_type": "、".join(flags), "can_create_ticket": True}
 
         elif route == "ticket_progress":
             # Direct DB query — no LLM
@@ -1208,6 +1251,18 @@ class OrchestratorService:
             payload=payload.get("payload", {}),
             cache_hit=True,
         )
+
+    def _is_capability_help_query(self, text: str) -> bool:
+        """True only for short capability questions, not real 求助/投诉 sentences."""
+        normalized = (text or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized in HELP_EXACT:
+            return True
+        # Real incident descriptions are longer; keep capability probes short
+        if len(normalized) > 16:
+            return False
+        return any(w in normalized for w in HELP_CAPABILITY_WORDS)
 
     def _user_key(self, user_context: dict) -> str:
         """Build user_key for rate limit / budget tracking."""

@@ -15,6 +15,16 @@ rules:
     - intent: bot_challenge
     - action: utter_iamabot
 
+  - rule: answer help request in Chinese
+    steps:
+    - intent: help
+    - action: utter_help
+
+  - rule: greet in Chinese
+    steps:
+    - intent: greet
+    - action: utter_greet
+
   - rule: start open incident form
     steps:
     - or:

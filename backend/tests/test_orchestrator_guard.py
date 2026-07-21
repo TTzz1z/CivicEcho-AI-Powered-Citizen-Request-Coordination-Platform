@@ -132,12 +132,51 @@ class TestGreetUsesTemplate:
         assert result.model_tier == MODEL_TIER_RULES
         assert result.message == HELP_MESSAGE
 
+    def test_capability_help_still_works(self):
+        from app.services.orchestrator_service import OrchestratorService
+        svc = OrchestratorService()
+        result = svc.process("你能干啥", user_context={"role": "citizen", "user_id": 1})
+        assert result.route == "general_chat"
+        assert result.primary_intent == "help"
+        assert result.message == HELP_MESSAGE
+
     def test_thank_you_does_not_invoke_llm(self):
         from app.services.orchestrator_service import OrchestratorService
         svc = OrchestratorService()
         result = svc.process("谢谢", user_context={"role": "citizen", "user_id": 1})
         # Should not invoke LLM (greet rule fires for "谢谢")
         assert result.model_tier == MODEL_TIER_RULES
+
+
+# ============================================================================
+# Missing-person / emergency must not fall into help menu
+# ============================================================================
+
+class TestMissingPersonEmergency:
+    def test_child_not_home_routes_to_emergency(self):
+        from app.services.orchestrator_service import OrchestratorService
+        svc = OrchestratorService()
+        text = "小孩放学到现在还没回家。我要怎么寻求帮助"
+        result = svc.process(text, user_context={"role": "citizen", "user_id": 1})
+        assert result.route == "emergency_route"
+        assert result.primary_intent == "emergency"
+        assert "110" in result.message
+        assert "走失" in result.message or "报警" in result.message
+        assert "I can help" not in result.message
+        # Must NOT be the generic capability help menu
+        assert result.message != HELP_MESSAGE
+        assert "提交投诉、建议、咨询或求助事项" not in result.message
+
+    def test_seeking_help_alone_is_not_capability_menu_when_long(self):
+        from app.services.orchestrator_service import OrchestratorService
+        svc = OrchestratorService()
+        # Contains 帮助 but describes a real situation — must not hit help template
+        result = svc.process(
+            "小区井盖丢了三天，我要寻求帮助",
+            user_context={"role": "citizen", "user_id": 1},
+        )
+        assert result.route != "general_chat" or result.primary_intent != "help"
+        assert result.message != HELP_MESSAGE
 
 
 # ============================================================================

@@ -4,9 +4,9 @@
 
 ## 权威基线
 
-- 产品范围和阶段顺序：`PRODUCT.md`、`ENGINEERING.md`、`UPGRADE-PLAN.md`。
-- 已验证现状和已知缺口：`PROJECT-AUDIT.md`。审计结论不能被旧发布报告覆盖。
-- 项目说明、架构和操作文档：`README.md` 与 `docs/`；若其描述与当前代码或审计证据冲突，应更新文档，不夸大能力。
+- 产品范围：`PRODUCT.md`、`ENGINEERING.md`。
+- 已验证现状：`docs/final-test-report.md` 与仓库内可复现测试命令；文档不得夸大未验证能力。
+- 项目说明、架构和操作文档：`README.md` 与 `docs/`；若其描述与当前代码冲突，应更新文档。
 
 ## 代码与架构边界
 

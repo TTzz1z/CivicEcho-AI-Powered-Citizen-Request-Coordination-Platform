@@ -16,7 +16,7 @@
 
 - `npm audit --omit=dev --registry=https://registry.npmjs.org`：0 vulnerabilities。
 - 升级前 Starlette 0.41.3 命中 6 项当前 GitHub 公告。调用点审计确认项目不使用受影响的文件响应、静态文件、multipart、urlencoded form 或 `HTTPEndpoint`，鉴权也不依赖 `request.url.path`。
-- Backend 已独立升级到 FastAPI 0.139.0 / Starlette 1.3.1；后端与完整链路回归通过，Starlette 匹配公告清零。详细逐项结论见 [V1.0 发布报告](round-7-release-report.md)。
+- Backend 已独立升级到 FastAPI 0.139.0 / Starlette 1.3.1；后端与完整链路回归通过，Starlette 匹配公告清零。详细结论见 [最终测试报告](final-test-report.md)。
 - Rasa 3.0.13 与其 Python 3.8 依赖树未升级；仅使用原配置/数据重新训练并固定 V1.0 模型制品。
 
 纵深缓解仍保留：只通过 Nginx 暴露 Backend、保持 1 MiB 请求体限制和超时、限制可信来源并监控 4xx/5xx。Rasa 主版本升级继续作为独立迁移工作处理。

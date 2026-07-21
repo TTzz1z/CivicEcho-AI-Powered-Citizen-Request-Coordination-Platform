@@ -95,8 +95,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose run --rm --no-deps rasa data validate
-      - run: docker compose run --rm --no-deps rasa test core --stories tests/test_conversations.yml --model models/tingting-v1.1.0-rasa3.6.20.tar.gz --fail-on-prediction-errors --out results/ci-core
-      - run: docker compose run --rm --no-deps rasa test nlu --nlu tests/test_nlu.yml --model models/tingting-v1.1.0-rasa3.6.20.tar.gz --out results/ci-nlu
+      - run: docker compose run --rm --no-deps rasa test core --stories tests/test_conversations.yml --model models/tingting-v1.3.0.tar.gz --fail-on-prediction-errors --out results/ci-core
+      - run: docker compose run --rm --no-deps rasa test nlu --nlu tests/test_nlu.yml --model models/tingting-v1.3.0.tar.gz --out results/ci-nlu
 
   e2e-three-browsers:
     runs-on: ubuntu-latest

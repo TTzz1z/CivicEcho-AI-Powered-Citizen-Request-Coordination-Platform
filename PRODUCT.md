@@ -142,4 +142,4 @@ stateDiagram-v2
 - 真实 LLM 调用产生 `ai_usage_logs` 记录，`total_tokens > 0`，`provider=deepseek`。
 - 降级路径有明确 `degrade_reason`，演示不中断。
 
-本文件的权威来源是 `UPGRADE-PLAN.md` 与 `PROJECT-AUDIT.md`；两者冲突时，以升级方案的范围和审计报告的已验证事实为准。
+本文件与 `ENGINEERING.md`、`README.md`、`docs/final-test-report.md` 共同构成产品与工程基线；若描述与当前代码冲突，以可运行代码与已验证测试结果为准。

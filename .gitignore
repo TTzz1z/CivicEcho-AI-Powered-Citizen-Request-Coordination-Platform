@@ -29,10 +29,9 @@ Thumbs.db
 .idea/
 
 # ----- Rasa generated artifacts -----
-# Keep only the sealed release models explicitly whitelisted below.
+# Keep only the sealed release model explicitly whitelisted below.
 models/*
-!models/tingting-v1.2.0.tar.gz
-!models/tingting-v1.1.0-rasa3.6.20.tar.gz
+!models/tingting-v1.3.0.tar.gz
 results/
 *.db-*
 rasa.db*
@@ -49,6 +48,7 @@ frontend/build/
 frontend/playwright-report/
 frontend/test-results/
 frontend/test-results-*/
+test-results/
 frontend/e2e-result*
 frontend/e2e-*.log
 frontend/e2e-*.json

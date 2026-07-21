@@ -54,8 +54,9 @@ flowchart LR
 | `appeals` | 市民申诉 | `appeal_no`、`sequence`、`status`（submitted/approved/rejected/reprocess/completed）、`reviewed_by_user_id` |
 | `ai_suggestions` | AI 建议原文 + 复核 | `suggestion_type`、`provider`、`model_name`、`input_fingerprint`、`risk_level`、`review_decision`（accept/reject/modify） |
 | `ticket_feedbacks` | 市民评价 | `rating`、`result`（satisfied/reprocess/appeal）、`resolution_version` |
-| `sla_policies` | SLA 策略 | `category_id`、`priority`、`accept_minutes`、`resolve_minutes` |
 | `kb_feedback` / `kb_eval_cases` / `kb_eval_runs` / `kb_no_answer_questions` | RAG 反馈与评测 | 评测用例、运行记录、无答案问题追踪 |
+
+> SLA 时限写在 `tickets.accept_due_at` / `tickets.resolve_due_at`（按 category×priority 在受理时计算）；`sla_policies` 表已在迁移 `0020` 删除，不再作为配置源。
 
 ## API 主链
 

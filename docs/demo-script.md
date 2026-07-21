@@ -196,5 +196,5 @@ SEED_PASSWORD=tingting-seed-demo-2026 docker exec -w /app tingting-assistant-bac
 - AI 调用超时：系统自动降级规则，AI 卡片 `provider` 变为 `rules`，演示不中断。
 - 端口冲突：只改 `.env` 的 `FRONTEND_PORT`，不改容器内端口。
 - 演示数据脏：再次执行 `python -m scripts.demo_reset`。
-- Rasa 首次加载慢：`docker compose logs rasa`，确认模型文件 `tingting-v1.2.0.tar.gz`。
+- Rasa 首次加载慢：`docker compose logs rasa`，确认模型文件 `tingting-v1.3.0.tar.gz`。
 - 不在现场执行 `docker compose down -v`，会删除数据库与 MinIO 卷。

@@ -13,7 +13,7 @@
 | 数据库 | PostgreSQL 16 + pgvector 扩展（`pgvector/pgvector:pg16`） |
 | LLM Provider | DeepSeek（OpenAI 兼容 `chat/completions`，`deepseek-chat`） |
 | Embedding Provider | SiliconFlow `text-embedding-v1`，1024 维 |
-| Rasa | 3.6.20 + Rasa SDK 3.6.2，模型 `tingting-v1.2.0-draft.tar.gz` |
+| Rasa | 3.6.20 + Rasa SDK 3.6.2，模型 `tingting-v1.3.0.tar.gz` |
 | 演示数据 | Seed 4 账号 + 演示 KB 文档 + reset 脚本 |
 
 `.env` 关键配置：

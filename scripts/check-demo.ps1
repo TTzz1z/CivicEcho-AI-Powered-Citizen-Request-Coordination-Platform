@@ -114,7 +114,7 @@ Invoke-Check '登录' '重新执行 Seed，并检查 backend 日志、账号 cit
     if (-not $login.success -or -not $login.data.access_token) { throw '登录响应中没有 access_token' }
 }
 
-Invoke-Check 'Rasa' '检查 models/tingting-v1.1.0-rasa3.6.20.tar.gz、rasa/action_server/duckling 日志以及 ACTION_SERVER_URL、DUCKLING_URL。' {
+Invoke-Check 'Rasa' '检查 models/tingting-v1.3.0.tar.gz、rasa/action_server/duckling 日志以及 ACTION_SERVER_URL、DUCKLING_URL。' {
     $status = Invoke-RestMethod -Uri "$rasaUrl/status" -TimeoutSec 10
     if (-not $status.model_file) { throw 'Rasa 未加载模型' }
     $sender = 'demo-check-' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()

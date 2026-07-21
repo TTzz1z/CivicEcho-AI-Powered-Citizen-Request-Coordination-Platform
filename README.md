@@ -9,9 +9,9 @@
 | 模块 | 已实现能力 |
 |---|---|
 | 市民政策咨询 | RAG 检索（pgvector 语义检索 + 关键词回退），引用必须包含 `title/doc_number/issuing_authority/excerpt`，无证据时返回 `no_evidence` 并提示建单 |
-| 工单全生命周期 | `pending → accepted → assigned → processing → resolved → closed` 状态机，含 `rejected`、版本号乐观锁、`idempotency_key` 幂等创建 |
-| 多部门协同 | `work_orders` 主办/协办/复核任务，部门退回、转派、提交结果，主办汇总 |
-| AI 办件助手 | advisory only（三态人工确认：accept/reject/modify），覆盖 `ticket_advice`、`pre_review`、`ai_analyze` 三类能力 |
+| 工单全生命周期 | `pending → accepted → assigned → processing → resolved → closed` 状态机，含 `rejected`、版本号乐观锁、`idempotency_key` 幂等创建、**权限校验先于 version 校验**(R4) |
+| 多部门协同 | `work_orders` 主办/协办/复核任务，部门退回、转派、提交结果，主办汇总；`awaiting_review` 由坐席复核办结 |
+| AI 办件助手 | advisory only（三态人工确认：adopted/adopted_with_edits/rejected，走 `/api/v1/kb/tickets/{id}/advice/review`)，覆盖 `ticket_advice`、`pre_review`、`ai_analyze` 三类能力 |
 | 知识库管理 | 文档上传 → 解析 → 审核 → 发布 → 版本（replaces_doc_id）→ 可见性（PUBLIC/DEPARTMENT/INTERNAL）→ 过期下架 |
 | Rasa NLU + Orchestrator | 分层路由（规则→OOD→LLM），10 条路由（policy_rag/service_guide/ticket_intake 等），多意图检测，session_id 隔离 |
 | AI 审计链路 | `ai_usage_logs` 记录 10 种 capability，每条含 `provider/model/total_tokens/latency/cost/degrade_reason/session_id` |
@@ -88,28 +88,37 @@ SEED_PASSWORD=tingting-seed-demo-2026 docker exec -w /app tingting-assistant-bac
 ## 测试命令
 
 ```powershell
-# 后端 pytest（80/80 passed）
+# 后端 pytest(86/86 passed,含 6 个权限顺序回归)
 docker compose exec -T backend pytest -q
 
-# 前端 vitest（17/17 passed）
+# 前端 vitest(17/17 passed)
 cd frontend; npm test
 
-# TypeScript tsc（0 errors）
+# TypeScript tsc(0 errors)
 cd frontend; npm run lint:types
 
-# Vite build（OK）
+# Vite build(OK)
 cd frontend; npm run build
 
-# Playwright E2E（96/96 passed）
+# Playwright Smoke(6/6 passed,~20s,日常使用)
+cd frontend; npx playwright test e2e/smoke.spec.ts --project=chromium
+
+# Playwright 全量 E2E(96/96 passed,~20 min,预发布/面试前用)
 cd frontend; npx playwright test
 
-# Alembic 升降级
+# Alembic 升降级 + 漂移检查
 docker compose exec -T backend alembic upgrade head
 docker compose exec -T backend alembic downgrade -1
-docker compose exec -T backend alembic check
+docker compose exec -T backend alembic check  # 应输出 "No new upgrade operations detected"
 
-# Docker 健康检查（8/8 healthy）
+# Docker 健康检查(8/8 healthy)
 docker compose ps
+
+# Rasa Action Server 单元测试(21/21)
+docker compose exec -T action_server python -m unittest discover -s tests -v
+
+# R4 五条业务闭环验证(21/21)
+docker compose exec -T backend python -m scripts.verify_r4_business_loops
 ```
 
 ## 文档索引
@@ -142,9 +151,9 @@ helpdesk-assistant-main/
 │   │   ├── llm_client.py     # DeepSeek 客户端
 │   │   ├── embedding_client.py # SiliconFlow Embedding 客户端
 │   │   └── seed.py            # 幂等 Seed
-│   ├── migrations/versions/  # Alembic 迁移 0001-0018
-│   ├── scripts/              # demo_reset.py / verify_r3_*.py
-│   └── tests/                # pytest 80 用例
+│   ├── migrations/versions/  # Alembic 迁移 0001-0021
+│   ├── scripts/              # demo_reset.py / verify_r*.py
+│   └── tests/                # pytest 用例
 ├── frontend/
 │   ├── src/
 │   │   ├── api/              # axios + tanstack query 客户端

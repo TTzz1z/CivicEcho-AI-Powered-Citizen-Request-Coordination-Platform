@@ -64,4 +64,16 @@ describe('ChatPage', () => {
     expect(screen.getByText('访客模式')).toBeInTheDocument()
     expect(screen.getByText(/登录市民账号后可提交工单/)).toBeInTheDocument()
   })
+
+  it('visitor chat uses orchestrator instead of rasa', async () => {
+    authState.user = null
+    renderApp(<MemoryRouter initialEntries={['/chat']}><ChatPage /></MemoryRouter>)
+    await userEvent.type(screen.getByLabelText('输入消息'), '你能干啥')
+    await userEvent.click(screen.getByRole('button', { name: /^发送$/ }))
+    await waitFor(() => {
+      expect(sendOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ message: '你能干啥' }))
+    })
+    expect(sendRasaMessage).not.toHaveBeenCalled()
+    expect(await screen.findByText(/工单已创建/)).toBeInTheDocument()
+  })
 })

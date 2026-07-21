@@ -31,6 +31,20 @@ def get_current_principal(
     return Principal("user", user.id, user.username, user.role, user.department_id)
 
 
+def get_optional_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+) -> Principal:
+    """Allow anonymous visitors; validate token when present."""
+    if not credentials or credentials.scheme.lower() != "bearer":
+        return Principal(kind="anonymous", username="visitor", role="anonymous")
+    try:
+        return get_current_principal(credentials, db)
+    except AuthenticationError:
+        # Invalid/expired token → treat as visitor rather than hard-fail chat
+        return Principal(kind="anonymous", username="visitor", role="anonymous")
+
+
 def get_user_principal(principal: Principal = Depends(get_current_principal)) -> Principal:
     if principal.kind != "user":
         raise AuthenticationError()

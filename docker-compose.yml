@@ -97,6 +97,7 @@ services:
       KB_CHUNK_OVERLAP: "${KB_CHUNK_OVERLAP:-100}"
       KB_RAG_TOP_K: "${KB_RAG_TOP_K:-5}"
       KB_UPLOAD_BUCKET: "${KB_UPLOAD_BUCKET:-tingting-kb}"
+      RASA_WEBHOOK_URL: "${RASA_WEBHOOK_URL:-http://rasa:5005/webhooks/rest/webhook}"
       KB_ALLOW_DIRECT_PUBLISH: "${KB_ALLOW_DIRECT_PUBLISH:-true}"
       INTEGRATION_TIMEOUT_SECONDS: "${INTEGRATION_TIMEOUT_SECONDS:-10}"
       OIDC_ENABLED: "${OIDC_ENABLED:-false}"
@@ -177,7 +178,7 @@ services:
 
   rasa:
     image: rasa/rasa:3.6.20-full@sha256:045b8f8f2097ef482671139838079fe94fe132e2ebd62a5808fb6cd589972c75
-    command: ["run", "--enable-api", "--cors", "${RASA_CORS_ORIGIN:-http://localhost:8080}", "--port", "5005", "--model", "/app/models/tingting-v1.2.0.tar.gz"]
+    command: ["run", "--enable-api", "--cors", "${RASA_CORS_ORIGIN:-http://localhost:8080}", "--port", "5005", "--model", "/app/models/tingting-v1.3.0.tar.gz"]
     environment:
       ACTION_SERVER_URL: "${ACTION_SERVER_URL:-http://action_server:5055/webhook}"
       DUCKLING_URL: "${DUCKLING_URL:-http://duckling:8000}"

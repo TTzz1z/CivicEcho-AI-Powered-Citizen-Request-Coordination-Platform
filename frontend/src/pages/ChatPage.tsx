@@ -9,6 +9,7 @@ import { api } from '../api/client'
 import type { DraftPayload, RasaMessage } from '../types'
 import { PageHeader } from '../components/PageHeader'
 import { TicketDraftPanel, type DraftState } from '../components/TicketDraftPanel'
+import { ensureChineseReply } from '../utils/languageGuard'
 
 type ChatItem = { id: string; side: 'user' | 'bot'; text: string; route?: string; payload?: Record<string, unknown>; buttons?: { title: string; payload: string }[]; cacheHit?: boolean; degraded?: boolean; degradeReason?: string; rateLimited?: boolean; budgetExceeded?: boolean; requiresLlm?: boolean; modelTier?: string }
 const suggestions = [
@@ -51,12 +52,13 @@ export function ChatPage() {
     const text = raw.trim(); if (!text || sending) return
     setFailed(null); setInput(''); setMessages(m => [...m, { id: crypto.randomUUID(), side: 'user', text }]); setSending(true)
     try {
-      // Use Orchestrator for logged-in citizens, fallback to Rasa for public/anonymous
-      if (user) {
+      // Plan C: visitors and logged-in users both use Orchestrator (Chinese routing).
+      // Rasa remains as fallback when Orchestrator is unreachable.
+      try {
         const result = await sendOrchestrator({ message: text, route_hint: routeHint, session_id: sessionId })
         handleOrchestratorResult(result, text)
-      } else {
-        // Public chat still uses Rasa
+      } catch {
+        // Fallback to language-guarded Rasa path
         const bareTicketId = /^QT\d{12,16}$/i.exec(text)
         const rasaText = bareTicketId ? `/query_request_status{"ticket_id":"${bareTicketId[0].toUpperCase()}"}` : text
         const response = await sendRasaMessage(sender, rasaText)
@@ -93,9 +95,9 @@ export function ChatPage() {
       setCurrentRoute(result.route)
     }
 
-    // Add bot message
+    // Add bot message (language-guarded client-side as last resort)
     setMessages(m => [...m, {
-      id: crypto.randomUUID(), side: 'bot', text: result.message,
+      id: crypto.randomUUID(), side: 'bot', text: ensureChineseReply(result.message),
       route: result.route, payload: result.payload,
       cacheHit: result.cache_hit,
       degraded: result.degraded,
@@ -108,7 +110,7 @@ export function ChatPage() {
 
     // If clarify, add clarification question
     if (result.should_clarify && result.clarify_question) {
-      setMessages(m => [...m, { id: crypto.randomUUID(), side: 'bot', text: result.clarify_question!, route: 'clarify' }])
+      setMessages(m => [...m, { id: crypto.randomUUID(), side: 'bot', text: ensureChineseReply(result.clarify_question!), route: 'clarify' }])
     }
 
     // Budget exceeded: prompt visitor to login
@@ -135,7 +137,7 @@ export function ChatPage() {
 
   const missingCount = draft ? draftMissing.filter(f => !draft[f as keyof DraftState]).length : 0
 
-  return <div className="chat-page"><PageHeader eyebrow="SMART SERVICE" title="智能对话" description="政策咨询、投诉建议、工单查询——统一入口，智能路由。" extra={isPublicChat?<Space wrap><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user&&<Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</Space>:undefined} /><div className="chat-shell">
+  return <div className="chat-page"><PageHeader eyebrow="SMART SERVICE" title="智能对话" description="政策咨询、投诉建议、工单查询——统一入口，智能路由。" extra={isPublicChat?<Space wrap><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user&&<Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</Space>:undefined} /><div className={`chat-shell${draft && screens.md ? ' has-draft' : ''}`}>
     <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button><Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}{isCitizen?<Alert style={{ marginTop: 16 }} type="success" showIcon message="已绑定市民账号" description={'工单将进入"我的工单"。'} />:<Alert style={{ marginTop: 16 }} type="warning" showIcon message={user?'当前不是市民角色':'访客模式'} description={user?'请切换市民账号提交工单。':<span>{'登录市民账号后可提交工单。'}<Link to="/login">去登录</Link></span>} />}</aside>
     <section className="chat-main" aria-label="智能对话区"><div ref={messagesViewport} className="messages" aria-live="polite">{messages.length === 0 && <div style={{ margin: 'auto', textAlign: 'center', maxWidth: 480 }}><div className="brand-mark" style={{ margin: '0 auto 18px', color: '#167c72', borderColor: '#82bdb6' }}>倾</div><Typography.Title level={3}>你好，我是倾听助手</Typography.Title><Typography.Paragraph type="secondary">我可以帮您咨询政策、提交投诉建议、查询工单进度。请直接描述您的需求。</Typography.Paragraph><Space wrap style={{ justifyContent: 'center' }}>{suggestions.map(s => <Tag key={s.hint} style={{ cursor: 'pointer', padding: '7px 11px' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Tag>)}</Space></div>}
       {messages.map(m => <div className={`message-row ${m.side}`} key={m.id}><div className="bubble">
@@ -148,7 +150,7 @@ export function ChatPage() {
       {failed && <Alert type="warning" showIcon closable message="消息发送失败" action={<Button size="small" icon={<ReloadOutlined />} onClick={() => submit(failed)}>重试</Button>} />}
       <div className="composer"><Input.TextArea aria-label="输入消息" autoSize={{ minRows: 1, maxRows: 4 }} value={input} onChange={e => setInput(e.target.value)} placeholder="描述您的问题，如：博士家人有哪些福利待遇 / 小区路灯坏了三天…" onPressEnter={e => { if (!e.shiftKey) { e.preventDefault(); void submit() } }} /><Button aria-label="发送" type="primary" size="large" icon={<SendOutlined />} loading={sending} disabled={!input.trim()} onClick={() => submit()}>发送</Button><Button aria-label="清空" icon={<DeleteOutlined />} onClick={clear} /></div>
     </section>
-    {draft && screens.md && <aside className="chat-draft-aside"><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={handleSubmitted} /></aside>}
+    {draft && screens.md && <aside className="chat-draft-aside" aria-label="工单草稿"><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={handleSubmitted} /></aside>}
   </div>
   {draft && !screens.md && <>
     <Button className="draft-fab" type="primary" shape="circle" size="large" icon={<Badge count={missingCount} offset={[-4, 4]}><FileTextOutlined /></Badge>} onClick={() => setDrawerOpen(true)} />

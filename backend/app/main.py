@@ -24,6 +24,7 @@ from .api.attachments import router as attachments_router
 from .api.ai import router as ai_router
 from .api.integrations import router as integrations_router
 from .api.orchestrator import router as orchestrator_router
+from .api.chat_proxy import router as chat_proxy_router
 from .api.kb import router as kb_router
 from .api.ai_usage import router as ai_usage_router
 from .config import get_settings
@@ -55,6 +56,7 @@ app.include_router(aftercare_router)
 app.include_router(ai_router)
 app.include_router(integrations_router)
 app.include_router(orchestrator_router)
+app.include_router(chat_proxy_router)
 app.include_router(kb_router)
 app.include_router(ai_usage_router)
 logger = logging.getLogger(__name__)

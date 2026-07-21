@@ -197,9 +197,31 @@ test.describe.serial('真实工单全状态闭环',()=>{
     await expect(page.getByText(/路灯连续三晚不亮/)).toBeVisible()
   })
 
-  test('坐席确认分类和优先级后受理工单',async({page})=>{await login(page,'agent_local');await expect(page).toHaveURL(/agent\/tickets/);await page.goto(`/agent/tickets/${ticketId}`);await page.getByRole('button',{name:'受理工单'}).click();await page.getByLabel('末级诉求分类').click();await page.getByText(/路灯故障 · CSGL-GGSS-LD/).last().click();await page.getByLabel('确认优先级').click();await page.getByText('紧急',{exact:true}).last().click();await page.getByLabel('操作备注').fill('E2E 坐席已核实分类和紧急程度');await page.getByRole('button',{name:'确认提交'}).click();await expect(page.locator('.ant-tag').filter({hasText:'已受理'}).first()).toBeVisible();await expect(page.getByText('城市管理 / 公共设施 / 路灯故障')).toBeVisible()})
+  test('坐席确认分类和优先级后受理工单',async({page})=>{
+    await login(page,'agent_local');await expect(page).toHaveURL(/agent\/tickets/);await page.goto(`/agent/tickets/${ticketId}`)
+    await page.getByRole('button',{name:'受理工单'}).click()
+    const dialog=page.getByRole('dialog')
+    await dialog.getByLabel('末级诉求分类').click()
+    await page.locator('.ant-select-item-option').filter({hasText:/路灯故障 · CSGL-GGSS-LD/}).click()
+    await dialog.getByLabel('确认优先级').click()
+    await page.locator('.ant-select-item-option').filter({hasText:'紧急'}).click()
+    await dialog.getByLabel('操作备注').fill('E2E 坐席已核实分类和紧急程度')
+    await dialog.getByRole('button',{name:'确认提交'}).click()
+    await expect(page.locator('.ant-tag').filter({hasText:'已受理'}).first()).toBeVisible({timeout:15_000})
+    await expect(page.getByText('城市管理 / 公共设施 / 路灯故障')).toBeVisible()
+  })
 
-  test('坐席通过页面派发责任部门并继续协调',async({page})=>{await login(page,'agent_local');await expect(page).toHaveURL(/agent\/tickets/);await page.goto(`/agent/tickets/${ticketId}`);await page.getByRole('button',{name:'派发部门'}).click();await page.getByLabel('责任部门').click();await page.locator('.ant-select-item-option').filter({hasText:'综合受理'}).click();await page.getByLabel('操作备注').fill('E2E 派发至综合受理');await page.getByRole('button',{name:'确认提交'}).click();await expect(page.getByText('部门协同任务')).toBeVisible();await expect(page.getByText('综合受理').first()).toBeVisible()})
+  test('坐席通过页面派发责任部门并继续协调',async({page})=>{
+    await login(page,'agent_local');await expect(page).toHaveURL(/agent\/tickets/);await page.goto(`/agent/tickets/${ticketId}`)
+    await page.getByRole('button',{name:'派发部门'}).click()
+    const dialog=page.getByRole('dialog')
+    await dialog.getByLabel('责任部门').click()
+    await page.locator('.ant-select-item-option').filter({hasText:'综合受理'}).click()
+    await dialog.getByLabel('操作备注').fill('E2E 派发至综合受理')
+    await dialog.getByRole('button',{name:'确认提交'}).click()
+    await expect(page.getByText('部门协同任务')).toBeVisible()
+    await expect(page.getByText('综合受理').first()).toBeVisible()
+  })
 
   test('部门人员开始处理',async({page})=>{
     await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await page.goto(`/department/tickets/${ticketId}`)
@@ -224,9 +246,7 @@ test.describe.serial('真实工单全状态闭环',()=>{
     const submitDialog=page.getByRole('dialog')
     await submitDialog.getByLabel('结果摘要').fill('路灯故障已修复')
     await submitDialog.getByLabel('处理措施').fill('更换损坏灯具并完成夜间亮灯测试')
-    // Modal title contains "处理结果"; target the combobox, not the dialog label.
-    await submitDialog.getByRole('combobox',{name:/处理结果/}).click()
-    await page.getByRole('option',{name:'已解决',exact:true}).click()
+    // WorkOrderPanel pre-fills result_outcome=resolved; avoid Select option clicks.
     await submitDialog.getByLabel('本部门公开答复').fill('已更换灯具并恢复照明')
     await submitDialog.getByLabel('操作说明').fill('E2E 部门内部复核通过')
     await submitDialog.getByRole('button',{name:'确认提交'}).click()
@@ -236,8 +256,6 @@ test.describe.serial('真实工单全状态闭环',()=>{
     const summaryDialog=page.getByRole('dialog')
     await summaryDialog.getByLabel('最终结果摘要').fill('路灯故障已修复')
     await summaryDialog.getByLabel('综合处理措施').fill('更换损坏灯具并完成夜间亮灯测试')
-    await summaryDialog.getByRole('combobox',{name:/最终结果/}).click()
-    await page.getByRole('option',{name:'已解决',exact:true}).click()
     await summaryDialog.getByLabel('对市民最终答复').fill('已更换灯具并恢复照明')
     await summaryDialog.getByLabel('操作说明').fill('E2E 主办部门汇总答复')
     await summaryDialog.getByRole('button',{name:'确认提交'}).click()
@@ -251,8 +269,6 @@ test.describe.serial('真实工单全状态闭环',()=>{
     const reviewDialog=page.getByRole('dialog')
     await reviewDialog.getByLabel('最终结果摘要').fill('路灯故障已修复')
     await reviewDialog.getByLabel('综合处理措施').fill('更换损坏灯具并完成夜间亮灯测试')
-    await reviewDialog.getByRole('combobox',{name:/最终结果/}).click()
-    await page.getByRole('option',{name:'已解决',exact:true}).click()
     await reviewDialog.getByLabel('对市民最终答复').fill('已更换灯具并恢复照明')
     await reviewDialog.getByLabel('操作说明').fill('E2E 坐席审核通过')
     await reviewDialog.getByRole('button',{name:'确认提交'}).click()

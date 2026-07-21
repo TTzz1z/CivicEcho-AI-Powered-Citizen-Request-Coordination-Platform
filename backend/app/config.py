@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # --- Knowledge Base / RAG ---
     embedding_api_key: str | None = None
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
-    embedding_model: str = "text-embedding-v1"
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimensions: int = 1024
     embedding_timeout_seconds: int = 30
     kb_chunk_size: int = 500

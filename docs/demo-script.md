@@ -10,7 +10,7 @@
 docker compose ps
 
 # 3. 一键重置演示数据
-SEED_PASSWORD=tingting-seed-demo-2026 CONFIRM_DEMO_RESET=YES docker exec -w /app -e SEED_PASSWORD -e CONFIRM_DEMO_RESET tingting-assistant-backend-1 python -m scripts.demo_reset --confirm-reset
+docker exec -w /app -e SEED_PASSWORD=tingting-seed-demo-2026 -e CONFIRM_DEMO_RESET=YES tingting-assistant-backend-1 python -m scripts.demo_reset --confirm-reset
 ```
 
 预期输出：清理事务表（tickets/notifications/ai_usage_logs/audit_logs 等）+ 重新 Seed 4 账号 + 演示 KB 文档。打开 `http://localhost:8080`，准备四个无痕窗口。

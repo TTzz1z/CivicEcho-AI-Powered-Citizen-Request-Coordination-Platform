@@ -19,8 +19,8 @@
 import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test'
 
 const PASSWORD = process.env.E2E_PASSWORD || 'tingting-seed-demo-2026'
-const BASE = process.env.E2E_BASE_URL || 'http://localhost:8081'
-const API = process.env.E2E_API_URL || 'http://localhost:8001'
+const BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:8081'
+const API = process.env.E2E_API_URL || 'http://127.0.0.1:8001'
 
 async function loginViaAPI(ctx: APIRequestContext, username: string): Promise<string> {
   const res = await ctx.post(`${API}/api/v1/auth/login`, { data: { username, password: PASSWORD } })

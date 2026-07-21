@@ -7,7 +7,10 @@ export POSTGRES_DB=tingting_e2e POSTGRES_USER=tingting_e2e POSTGRES_PASSWORD=e2e
 export JWT_SECRET=e2e-jwt-secret-isolated-at-least-32-characters SERVICE_API_TOKEN=e2e-service-token-isolated-at-least-32-chars
 export FRONTEND_PORT=18081 BACKEND_PORT=18001 RASA_PORT=15005 ACTION_SERVER_PORT=15055 DUCKLING_PORT=28000
 export MINIO_API_PORT=29010 MINIO_CONSOLE_PORT=29011
-export E2E_BASE_URL=http://localhost:18081 CORS_ORIGINS=http://localhost:18081 RASA_CORS_ORIGIN=http://localhost:18081
+# Prefer 127.0.0.1 to avoid CI runners resolving localhost to ::1 while Compose binds IPv4.
+export E2E_BASE_URL=http://127.0.0.1:18081
+export E2E_API_URL=http://127.0.0.1:18001
+export CORS_ORIGINS=http://127.0.0.1:18081 RASA_CORS_ORIGIN=http://127.0.0.1:18081
 cleanup() { docker compose -p tingting-e2e down -v --remove-orphans; }
 trap cleanup EXIT INT TERM
 docker compose -p tingting-e2e up -d --build --wait

@@ -4,7 +4,7 @@ export default defineConfig({
   // Round 2 r2-9: global setup pre-warms Rasa + backend + orchestrator so the
   // first real E2E test doesn't pay the 4-8s cold-start cost (root cause #4/#8).
   globalSetup: './e2e/global-setup.ts',
-  use: { baseURL: process.env.E2E_BASE_URL || 'http://localhost:8081', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
+  use: { baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:8081', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
   projects: [
     // R5: default to chromium only for daily runs (Smoke tests).
     // Use --project=firefox / --project=webkit explicitly for full regression.

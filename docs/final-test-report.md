@@ -12,7 +12,7 @@
 | Docker Compose 服务 | 8 个容器（frontend / backend / postgres / minio / rasa / action_server / duckling / worker） |
 | 数据库 | PostgreSQL 16 + pgvector 扩展（`pgvector/pgvector:pg16`） |
 | LLM Provider | DeepSeek（OpenAI 兼容 `chat/completions`，`deepseek-chat`） |
-| Embedding Provider | SiliconFlow `text-embedding-v1`，1024 维 |
+| Embedding Provider | SiliconFlow `Qwen/Qwen3-Embedding-0.6B`，1024 维 |
 | Rasa | 3.6.20 + Rasa SDK 3.6.2，模型 `tingting-v1.3.0.tar.gz` |
 | 演示数据 | Seed 4 账号 + 演示 KB 文档 + reset 脚本 |
 
@@ -23,7 +23,7 @@ AI_PROVIDER=deepseek
 AI_API_KEY=<已填>
 AI_MODEL=deepseek-chat
 EMBEDDING_API_KEY=<已填>
-EMBEDDING_MODEL=text-embedding-v1
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 EMBEDDING_DIMENSIONS=1024
 ```
 
@@ -100,7 +100,7 @@ EMBEDDING_DIMENSIONS=1024
 | `auth-switch.spec.ts` | ~12 | 登录、角色切换、退出后路由守卫 |
 | `chat-draft.spec.ts` | ~14 | 智能对话建单草稿模式（路灯/教育/政策咨询） |
 | `chat-layout.spec.ts` | ~8 | 长对话滚动、公开会话归属说明 |
-| `orchestrator.spec.ts` | ~20 | 10 条路由 E2E（政策咨询/办事指南/草稿/进度查询等） |
+| `orchestrator.spec.ts` | ~20 | 11 条路由 E2E（政策咨询/办事指南/草稿/进度查询等） |
 | `round2-ai-credibility.spec.ts` | ~14 | session_id 隔离、引用字段、降级标记、三态确认 |
 | `workflows.spec.ts` | ~28 | 四角色闭环、申诉重办、AI 办件助手、审计链路 |
 

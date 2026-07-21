@@ -333,13 +333,18 @@ def test_degraded_call_marks_degraded_flag(actors):
 
 def test_service_principal_only_sees_public_published(actors):
     """Citizens (PUBLIC-only) must not see DEPARTMENT/INTERNAL/EXPIRED docs."""
-    res = client.get("/api/v1/kb/documents?limit=100",
-                     headers=headers(actors["citizen"]))
+    res = client.get(
+        "/api/v1/kb/documents?page_size=100",
+        headers=headers(actors["citizen"]),
+    )
     assert res.status_code == 200
-    docs = res.json()["data"].get("items") or res.json()["data"]
+    payload = res.json()["data"]
+    docs = payload.get("items", []) if isinstance(payload, dict) else payload
+    assert isinstance(docs, list), f"expected document list, got {type(docs).__name__}"
     for d in docs:
-        assert d["visibility"] == "PUBLIC", f"doc {d['title']} leaked non-PUBLIC visibility"
-        assert d["status"] == "PUBLISHED", f"doc {d['title']} leaked non-PUBLISHED status"
+        assert isinstance(d, dict), f"expected document object, got {d!r}"
+        assert d["visibility"] == "PUBLIC", f"doc {d.get('title')} leaked non-PUBLIC visibility"
+        assert d["status"] == "PUBLISHED", f"doc {d.get('title')} leaked non-PUBLISHED status"
 
 
 # ============================================================================

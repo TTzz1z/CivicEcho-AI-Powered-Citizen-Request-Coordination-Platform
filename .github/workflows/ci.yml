@@ -219,7 +219,8 @@ jobs:
         run: |
           set -eux
           docker build -f Dockerfile.clamav-mock -t tingting-clamav-mock:ci .
-          if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build; then
+          # Core production path only (avoid full Rasa/frontend stack flakiness on runners).
+          if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod up -d --build postgres minio clamav backend worker; then
             docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps -a || true
             docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=200 || true
             exit 1

@@ -252,9 +252,25 @@ jobs:
             compose logs --no-color --tail=200 || true
             exit 1
           fi
+          # Validate production Settings with the exact compose-injected env before detach.
+          compose run --no-deps --rm backend python -c "from app.config import get_settings; s=get_settings(); print('settings-ok', s.app_env, s.object_storage_secure, s.malware_scan_mode, bool(s.object_storage_endpoint))"
           if ! compose up -d --no-build --no-deps backend worker; then
             compose ps -a || true
             compose logs --no-color --tail=200 || true
+            exit 1
+          fi
+          # Fail fast with visible diagnostics if backend exits during boot.
+          sleep 10
+          compose ps -a
+          {
+            echo "## production-compose backend boot"
+            echo '```'
+            compose logs --no-color --tail=120 backend || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! compose ps --status running --services | grep -qx backend; then
+            echo "backend is not running after boot window" >> "$GITHUB_STEP_SUMMARY"
+            compose logs --no-color --tail=200 backend worker postgres || true
             exit 1
           fi
       - name: Wait for core services (postgres/minio/backend)
@@ -275,9 +291,27 @@ jobs:
             fi
             sleep 5
           done
-          compose ps -a || true
-          compose logs --no-color --tail=200 backend worker || true
+          {
+            echo "## production-compose readiness failure"
+            echo '```'
+            compose ps -a || true
+            compose logs --no-color --tail=200 backend worker postgres minio clamav || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 1
+      - name: Capture compose diagnostics file
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod ps -a > production-compose-diagnostics.txt || true
+          echo "===== LOGS =====" >> production-compose-diagnostics.txt
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod logs --no-color --tail=300 >> production-compose-diagnostics.txt || true
+      - name: Upload compose diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-compose-diagnostics
+          path: production-compose-diagnostics.txt
+          if-no-files-found: ignore
       - name: Wait for ClamAV
         run: |
           set -eux

@@ -506,7 +506,7 @@ class AiService:
         )
         description = ticket.description or ""
         category_name = ticket.category.name if getattr(ticket, "category", None) else "未分类"
-        return {
+        advice = {
             "applicable_policies": ["请查阅本部门相关制度文件"],
             "verification_needed": ["核实市民描述的事实是否属实", "确认涉及的具体位置和责任方"],
             "material_completeness": "市民提交信息基本完整" if len(description) > 20 else "描述较简略，建议联系市民补充",
@@ -520,4 +520,15 @@ class AiService:
             "provider": "rules",
             "model": "rules-fallback",
             "advisory_only": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+        try:
+            from ..services.kb_service import KnowledgeBaseService
+            from ..database import SessionLocal
+            with SessionLocal() as kb_db:
+                advice = KnowledgeBaseService(kb_db)._persist_ticket_advice(ticket, principal, advice)
+                kb_db.commit()
+        except Exception:
+            advice_id = str(uuid4())
+            advice["advice_id"] = advice_id
+        return advice

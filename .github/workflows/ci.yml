@@ -187,29 +187,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: Write .env.prod for CI
         run: |
-          cat > .env.prod <<'EOF'
-          JWT_SECRET=ci-prod-jwt-secret-at-least-32-characters-long
-          SERVICE_API_TOKEN=ci-prod-service-token-at-least-32-chars
-          POSTGRES_PASSWORD=CiProdPgSecret9f3a2b7c1d4e5f60
-          APP_ENV=production
-          SITE_ADDRESS=localhost
-          CORS_ORIGINS=https://localhost
-          RASA_CORS_ORIGIN=https://localhost
-          POSTGRES_DB=tingting
-          POSTGRES_USER=tingting
-          MINIO_ROOT_USER=ciProdMinioUser
-          MINIO_ROOT_PASSWORD=CiProdMinioSecret9f3a2b7c1d4e
-          OBJECT_STORAGE_ENDPOINT=minio:9000
-          OBJECT_STORAGE_ACCESS_KEY=ciProdMinioUser
-          OBJECT_STORAGE_SECRET_KEY=CiProdMinioSecret9f3a2b7c1d4e
-          OBJECT_STORAGE_BUCKET=tingting-attachments
-          KB_UPLOAD_BUCKET=tingting-kb
-          OBJECT_STORAGE_SECURE=false
-          MALWARE_SCAN_MODE=clamd
-          MALWARE_SCAN_URL=clamav:3310
-          MALWARE_SCAN_REQUIRE_CLEAN=true
-          SEED_PASSWORD=CI-Seed-Only-From-Workflow-2026!
-          EOF
+          printf '%s\n' \
+            'JWT_SECRET=ci-prod-jwt-secret-at-least-32-characters-long' \
+            'SERVICE_API_TOKEN=ci-prod-service-token-at-least-32-chars' \
+            'POSTGRES_PASSWORD=CiProdPgSecret9f3a2b7c1d4e5f60' \
+            'APP_ENV=production' \
+            'SITE_ADDRESS=localhost' \
+            'CORS_ORIGINS=https://localhost' \
+            'RASA_CORS_ORIGIN=https://localhost' \
+            'POSTGRES_DB=tingting' \
+            'POSTGRES_USER=tingting' \
+            'MINIO_ROOT_USER=ciProdMinioUser' \
+            'MINIO_ROOT_PASSWORD=CiProdMinioSecret9f3a2b7c1d4e' \
+            'OBJECT_STORAGE_ENDPOINT=minio:9000' \
+            'OBJECT_STORAGE_ACCESS_KEY=ciProdMinioUser' \
+            'OBJECT_STORAGE_SECRET_KEY=CiProdMinioSecret9f3a2b7c1d4e' \
+            'OBJECT_STORAGE_BUCKET=tingting-attachments' \
+            'KB_UPLOAD_BUCKET=tingting-kb' \
+            'OBJECT_STORAGE_SECURE=false' \
+            'MALWARE_SCAN_MODE=clamd' \
+            'MALWARE_SCAN_URL=clamav:3310' \
+            'MALWARE_SCAN_REQUIRE_CLEAN=true' \
+            'SEED_PASSWORD=CI-Seed-Only-From-Workflow-2026!' \
+            > .env.prod
       - name: Validate production compose
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod config -q
       - name: Start production compose

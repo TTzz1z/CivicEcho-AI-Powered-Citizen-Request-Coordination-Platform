@@ -288,16 +288,19 @@ def loop5_ai_three_way_review(agent_token, dept_token, citizen_token):
     step("case_advice_generated", s == 200 and b.get("data", {}).get("advisory_only") is True,
          f"status={s} advisory_only={b.get('data', {}).get('advisory_only')}")
 
-    # Submit three decisions sequentially via the real three-state endpoint.
-    # Note: this endpoint is intentionally idempotent-safe — each call writes
-    # a new audit_logs entry; nothing about ticket.status changes.
+    # Submit three decisions; each needs a fresh advice_id (reviews are one-shot).
     decisions = [
         ("adopted", None),
         ("adopted_with_edits", "调整了回复措辞和办理步骤"),
         ("rejected", None),
     ]
     for decision, edit_summary in decisions:
-        payload = {"decision": decision}
+        s, advice_body = http("POST", f"/api/v1/ai/tickets/{tid}/case-advice", agent_token, {})
+        advice_id = (advice_body.get("data") or {}).get("advice_id") if s == 200 else None
+        if not advice_id:
+            step(f"ai_advice_review_{decision}", False, f"missing advice_id status={s} body={advice_body}")
+            continue
+        payload = {"advice_id": advice_id, "decision": decision}
         if edit_summary:
             payload["edit_summary"] = edit_summary
         s, b = http("POST", f"/api/v1/kb/tickets/{tid}/advice/review", agent_token, payload)

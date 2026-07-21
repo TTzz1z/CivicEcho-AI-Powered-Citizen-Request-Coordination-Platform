@@ -25,4 +25,4 @@
 
 1. Push main → Actions 全绿（含 `production-compose`）
 2. workflow_dispatch 触发 `e2e-full`
-3. Release Notes → tag `v1.0.0` → 之后仅修 Bug
+3. [RELEASE_NOTES_v1.0.0.md](./RELEASE_NOTES_v1.0.0.md) → tag `v1.0.0` → 之后仅修 Bug

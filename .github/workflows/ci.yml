@@ -226,24 +226,32 @@ jobs:
           docker pull pgvector/pgvector:pg16
           docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z
           docker build -f Dockerfile.clamav-mock -t tingting-clamav-mock:ci .
-          docker build -f Dockerfile.backend -t tingting-assistant-backend .
-          docker tag tingting-assistant-backend tingting-assistant-worker
+          docker build --build-arg "CI_CACHEBUST=${GITHUB_SHA}" -f Dockerfile.backend -t tingting-ci-backend:ci .
+          # Guard against stale Settings that still require OBJECT_STORAGE_SECURE=true.
+          docker run --rm tingting-ci-backend:ci python -c "import inspect; from app.config import Settings; src=inspect.getsource(Settings.reject_weak_production_secrets); assert 'OBJECT_STORAGE_SECURE must be true' not in src, src; print('settings-guard-ok')"
           # Core production path only (avoid full Rasa/frontend stack flakiness on runners).
           if ! compose up -d --no-build postgres minio clamav; then
             compose ps -a || true
             compose logs --no-color --tail=200 || true
             exit 1
           fi
+          infra_ready=0
           for i in $(seq 1 60); do
             pg_ok=$(compose exec -T postgres pg_isready -U tingting -d tingting >/dev/null 2>&1 && echo 1 || echo 0)
             minio_ok=$(compose exec -T minio curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && echo 1 || echo 0)
             clam_ok=$(compose exec -T clamav python -c "import socket; s=socket.create_connection(('127.0.0.1',3310),2); s.close()" >/dev/null 2>&1 && echo 1 || echo 0)
             if [ "$pg_ok" = "1" ] && [ "$minio_ok" = "1" ] && [ "$clam_ok" = "1" ]; then
               echo "infra ready"
+              infra_ready=1
               break
             fi
             sleep 3
           done
+          if [ "$infra_ready" != "1" ]; then
+            compose ps -a || true
+            compose logs --no-color --tail=200 || true
+            exit 1
+          fi
           if ! compose up -d --no-build --no-deps backend worker; then
             compose ps -a || true
             compose logs --no-color --tail=200 || true
@@ -252,14 +260,24 @@ jobs:
       - name: Wait for core services (postgres/minio/backend)
         run: |
           set -eux
-          for i in $(seq 1 60); do
-            if docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
+          compose() {
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod "$@"
+          }
+          for i in $(seq 1 72); do
+            if compose exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
               echo "backend ready"
-              break
+              exit 0
+            fi
+            echo "backend not ready attempt=$i"
+            if [ $((i % 6)) -eq 0 ]; then
+              compose ps -a || true
+              compose logs --no-color --tail=80 backend worker || true
             fi
             sleep 5
           done
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+          compose ps -a || true
+          compose logs --no-color --tail=200 backend worker || true
+          exit 1
       - name: Wait for ClamAV
         run: |
           set -eux

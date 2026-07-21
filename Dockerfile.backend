@@ -3,6 +3,9 @@ WORKDIR /app
 COPY backend/requirements.txt backend/requirements.lock.txt ./
 RUN python -m pip install --no-cache-dir --upgrade pip==26.1.2 \
     && pip install --no-cache-dir -r requirements.lock.txt
+# Bust COPY cache on CI so production Settings changes are never served from stale layers.
+ARG CI_CACHEBUST=1
+RUN printf '%s\n' "$CI_CACHEBUST" > /tmp/ci_cachebust
 COPY backend .
 RUN chmod +x /app/entrypoint.sh
 EXPOSE 8000

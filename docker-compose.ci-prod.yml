@@ -15,6 +15,10 @@ services:
       retries: 10
       start_period: 5s
   backend:
+    image: tingting-ci-backend:ci
+    pull_policy: never
+    environment:
+      OBJECT_STORAGE_SECURE: "false"
     depends_on:
       postgres:
         condition: service_healthy
@@ -22,6 +26,9 @@ services:
         condition: service_healthy
       clamav:
         condition: service_healthy
+  worker:
+    image: tingting-ci-backend:ci
+    pull_policy: never
   caddy:
     ports: !override
       - "8088:80"

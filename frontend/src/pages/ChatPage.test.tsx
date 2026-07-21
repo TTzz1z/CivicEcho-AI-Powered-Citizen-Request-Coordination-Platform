@@ -76,4 +76,17 @@ describe('ChatPage', () => {
     expect(sendRasaMessage).not.toHaveBeenCalled()
     expect(await screen.findByText(/工单已创建/)).toBeInTheDocument()
   })
+
+  it('sanitizes rasa fallback that falsely claims ticket creation', async () => {
+    vi.mocked(sendOrchestrator).mockRejectedValueOnce(new Error('orchestrator down'))
+    vi.mocked(sendRasaMessage).mockResolvedValueOnce([{
+      text: '已收到您的诉求信息（本地演示模式）：请前往“我的工单”查看后续办理进度。',
+    }])
+    renderApp(<MemoryRouter><ChatPage /></MemoryRouter>)
+    await userEvent.type(screen.getByLabelText('输入消息'), '路灯坏了')
+    await userEvent.click(screen.getByRole('button', { name: /^发送$/ }))
+    expect(await screen.findByText(/系统没有创建真实工单/)).toBeInTheDocument()
+    expect(screen.queryByText(/请前往.“我的工单”.查看后续办理进度/)).not.toBeInTheDocument()
+    expect(screen.getByText(/智能编排暂时不可用|orchestrator_unavailable|当前回答已降级/)).toBeInTheDocument()
+  })
 })

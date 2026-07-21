@@ -75,8 +75,8 @@ services:
       APP_ENV: "production"
       CORS_ORIGINS: "${CORS_ORIGINS:?Set CORS_ORIGINS in .env.prod}"
       OBJECT_STORAGE_SECURE: "true"
-      MALWARE_SCAN_MODE: "http"
-      MALWARE_SCAN_URL: "http://clamav:9000/scan"
+      MALWARE_SCAN_MODE: "clamd"
+      MALWARE_SCAN_URL: "clamav:3310"
       MALWARE_SCAN_REQUIRE_CLEAN: "true"
     depends_on:
       postgres:

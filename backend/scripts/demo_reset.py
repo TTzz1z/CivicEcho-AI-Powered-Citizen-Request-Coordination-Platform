@@ -1,60 +1,29 @@
-"""Round 4 demo environment: deterministic one-click reset + seed.
+"""Demo environment: deterministic one-click reset + seed.
 
 Usage:
-    SEED_PASSWORD=tingting-seed-demo-2026 python -m scripts.demo_reset
+    SEED_PASSWORD=tingting-seed-demo-2026 \\
+      python -m scripts.demo_reset --confirm-reset
 
-R4 changes (deterministic reset):
-1. Users: keep ONLY whitelisted usernames (demo accounts); delete everything else.
-2. Departments: keep ONLY whitelisted codes; delete everything else (including test departments).
-3. Categories: keep ONLY whitelisted codes; delete everything else.
-4. All transactional tables (tickets/work_orders/notifications/appeals/feedbacks/follow_ups/ai_usage/audit/outbox/integration_events): truncate fully.
-5. KB documents: keep only those seeded by app.seed (identified by title whitelist); delete test P0-KB-*/P0-D-* patterns.
-6. Re-seed via app.seed.seed() (idempotent).
-
-Deterministic guarantee:
-- After this script, the DB contains ONLY the whitelisted demo accounts/departments/categories
-  plus whatever app.seed.seed() inserts.
-- Run it twice in a row → identical state both times.
+Safety guards (Round-1):
+- Refuses APP_ENV=production|prod
+- Database name must be in the demo/e2e/ci whitelist
+- Requires --confirm-reset or CONFIRM_DEMO_RESET=YES
 
 This script is intentionally destructive. NEVER run it against a production database.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
-from sqlalchemy import delete, select, func
-
-from app.database import SessionLocal
-from app.models import (
-    AiSuggestionModel,
-    AiUsageLogModel,
-    AppealModel,
-    AuditLogModel,
-    CategoryModel,
-    DepartmentModel,
-    IntegrationEventModel,
-    KbChunkModel,
-    KbDocumentModel,
-    KbEvalCaseModel,
-    KbEvalRunModel,
-    KbFeedbackModel,
-    KbNoAnswerQuestionModel,
-    NotificationModel,
-    NotificationOutboxModel,
-    PhoneFollowUpRecordModel,
-    FollowUpTaskModel,
-    TicketAttachmentModel,
-    TicketFeedbackModel,
-    TicketModel,
-    TicketStatusHistoryModel,
-    UserModel,
-    WorkOrderHistoryModel,
-    WorkOrderModel,
-)
-
-
-# ---------------- Whitelists ----------------
+ALLOWED_DEMO_DB_NAMES = frozenset({
+    "tingting",
+    "tingting_e2e",
+    "tingting_ci",
+    "tingting_test",
+})
 
 DEMO_USERNAMES = {
     "citizen_local",
@@ -79,115 +48,213 @@ DEMO_CATEGORY_CODES = {
     "CSGL-GGSS-LD",
 }
 
-# Tables fully truncated (children first to respect FK)
-TRUNCATE_MODELS = [
-    PhoneFollowUpRecordModel,
-    FollowUpTaskModel,
-    NotificationOutboxModel,
-    NotificationModel,
-    AppealModel,
-    TicketFeedbackModel,
-    AiSuggestionModel,
-    AiUsageLogModel,
-    IntegrationEventModel,
-    WorkOrderHistoryModel,
-    WorkOrderModel,
-    TicketAttachmentModel,
-    TicketStatusHistoryModel,
-    TicketModel,
-    AuditLogModel,
-    KbFeedbackModel,
-    KbEvalRunModel,
-    KbNoAnswerQuestionModel,
-]
+
+def _database_name(database_url: str) -> str:
+    parsed = urlparse(database_url)
+    name = (parsed.path or "").lstrip("/")
+    return name.split("?")[0].strip()
 
 
-def reset_transactional_data(db) -> dict[str, int]:
+def assert_safe_to_reset(*, confirm_reset: bool) -> None:
+    """Hard guards against wiping a non-demo database.
+
+    Uses process environment only so production refusal works before Settings
+    validators (malware scan etc.) are loaded.
+    """
+    if not os.environ.get("SEED_PASSWORD"):
+        print("ERROR: SEED_PASSWORD must be set (>=12 chars)")
+        sys.exit(1)
+
+    app_env = (os.environ.get("APP_ENV") or "development").strip().lower()
+    if app_env in {"production", "prod"}:
+        print(f"ERROR: demo_reset refused when APP_ENV={app_env}")
+        sys.exit(2)
+
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
+        print("ERROR: DATABASE_URL must be set for demo_reset")
+        sys.exit(2)
+
+    db_name = _database_name(database_url)
+    if db_name not in ALLOWED_DEMO_DB_NAMES:
+        print(
+            f"ERROR: database '{db_name}' is not in the demo whitelist "
+            f"{sorted(ALLOWED_DEMO_DB_NAMES)}"
+        )
+        sys.exit(2)
+
+    confirmed = confirm_reset or os.environ.get("CONFIRM_DEMO_RESET", "").upper() == "YES"
+    if not confirmed:
+        print("ERROR: pass --confirm-reset or set CONFIRM_DEMO_RESET=YES")
+        sys.exit(2)
+
+
+def _load_models():
+    from sqlalchemy import delete, select, func
+
+    from app.database import SessionLocal
+    from app.models import (
+        AiSuggestionModel,
+        AiUsageLogModel,
+        AppealModel,
+        AuditLogModel,
+        CategoryModel,
+        DepartmentModel,
+        IntegrationEventModel,
+        KbChunkModel,
+        KbDocumentModel,
+        KbEvalCaseModel,
+        KbEvalRunModel,
+        KbFeedbackModel,
+        KbNoAnswerQuestionModel,
+        NotificationModel,
+        NotificationOutboxModel,
+        PhoneFollowUpRecordModel,
+        FollowUpTaskModel,
+        TicketAttachmentModel,
+        TicketFeedbackModel,
+        TicketModel,
+        TicketStatusHistoryModel,
+        UserModel,
+        WorkOrderHistoryModel,
+        WorkOrderModel,
+    )
+
+    truncate_models = [
+        PhoneFollowUpRecordModel,
+        FollowUpTaskModel,
+        NotificationOutboxModel,
+        NotificationModel,
+        AppealModel,
+        TicketFeedbackModel,
+        AiSuggestionModel,
+        AiUsageLogModel,
+        IntegrationEventModel,
+        WorkOrderHistoryModel,
+        WorkOrderModel,
+        TicketAttachmentModel,
+        TicketStatusHistoryModel,
+        TicketModel,
+        AuditLogModel,
+        KbFeedbackModel,
+        KbEvalRunModel,
+        KbNoAnswerQuestionModel,
+    ]
+    return {
+        "SessionLocal": SessionLocal,
+        "delete": delete,
+        "select": select,
+        "func": func,
+        "truncate_models": truncate_models,
+        "UserModel": UserModel,
+        "DepartmentModel": DepartmentModel,
+        "CategoryModel": CategoryModel,
+        "KbDocumentModel": KbDocumentModel,
+        "KbChunkModel": KbChunkModel,
+        "TicketModel": TicketModel,
+        "AiUsageLogModel": AiUsageLogModel,
+        "AuditLogModel": AuditLogModel,
+        "NotificationModel": NotificationModel,
+        "FollowUpTaskModel": FollowUpTaskModel,
+        "KbEvalCaseModel": KbEvalCaseModel,
+    }
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Deterministic demo DB reset + seed")
+    parser.add_argument(
+        "--confirm-reset",
+        action="store_true",
+        help="Required confirmation that this is an intentional destructive reset",
+    )
+    args = parser.parse_args(argv)
+    assert_safe_to_reset(confirm_reset=args.confirm_reset)
+
+    ctx = _load_models()
+    SessionLocal = ctx["SessionLocal"]
+    delete = ctx["delete"]
+    select = ctx["select"]
+    func = ctx["func"]
+    db = SessionLocal()
+
+    print("=== Step 1: Truncate transactional data ===")
     counts = {}
-    for model in TRUNCATE_MODELS:
+    for model in ctx["truncate_models"]:
         result = db.execute(delete(model))
         counts[model.__name__] = result.rowcount or 0
     db.commit()
-    return counts
+    for k, v in counts.items():
+        if v > 0:
+            print(f"  deleted {v} from {k}")
 
-
-def clean_non_whitelist_users(db) -> int:
-    """Delete any user not in DEMO_USERNAMES. Deterministic."""
+    print("\n=== Step 2: Clean non-whitelist users ===")
     result = db.execute(
-        delete(UserModel).where(UserModel.username.notin_(DEMO_USERNAMES))
+        delete(ctx["UserModel"]).where(ctx["UserModel"].username.notin_(DEMO_USERNAMES))
     )
     db.commit()
-    return result.rowcount or 0
+    print(f"  deleted {result.rowcount or 0} non-whitelist users")
 
-
-def clean_non_whitelist_departments(db) -> int:
-    """Delete any department not in DEMO_DEPARTMENT_CODES. Deterministic."""
+    print("\n=== Step 3: Clean non-whitelist departments ===")
     result = db.execute(
-        delete(DepartmentModel).where(DepartmentModel.code.notin_(DEMO_DEPARTMENT_CODES))
+        delete(ctx["DepartmentModel"]).where(
+            ctx["DepartmentModel"].code.notin_(DEMO_DEPARTMENT_CODES)
+        )
     )
     db.commit()
-    return result.rowcount or 0
+    print(f"  deleted {result.rowcount or 0} non-whitelist departments")
 
-
-def clean_non_whitelist_categories(db) -> int:
-    """Delete any category not in DEMO_CATEGORY_CODES."""
+    print("\n=== Step 4: Clean non-whitelist categories ===")
     result = db.execute(
-        delete(CategoryModel).where(CategoryModel.code.notin_(DEMO_CATEGORY_CODES))
+        delete(ctx["CategoryModel"]).where(
+            ctx["CategoryModel"].code.notin_(DEMO_CATEGORY_CODES)
+        )
     )
     db.commit()
-    return result.rowcount or 0
+    print(f"  deleted {result.rowcount or 0} non-whitelist categories")
 
-
-def clean_test_kb_docs(db) -> int:
-    """Delete KB docs whose title matches test patterns; keep seed-managed docs."""
-    test_patterns = ("P0-KB-%", "P0-D-%", "test-%", "Test-%", "TEST-%", "e2e-%", "r2-%", "r3-%", "round%")
+    print("\n=== Step 5: Clean test KB docs ===")
+    KbDocumentModel = ctx["KbDocumentModel"]
+    KbChunkModel = ctx["KbChunkModel"]
     total = 0
-    for pattern in test_patterns:
+    for pattern in ("P0-KB-%", "P0-D-%", "test-%", "Test-%", "TEST-%", "e2e-%", "r2-%", "r3-%", "round%"):
         result = db.execute(delete(KbDocumentModel).where(KbDocumentModel.title.like(pattern)))
         total += result.rowcount or 0
-    # Clean orphan chunks
     db.execute(delete(KbChunkModel).where(
         KbChunkModel.document_id.notin_(select(KbDocumentModel.id))
     ))
     db.commit()
-    return total
+    print(f"  deleted {total} test KB docs")
 
+    print("\n=== Step 6: Re-seed demo data ===")
+    from app.seed import seed
+    result = seed()
+    print(f"  seed result: {result}")
 
-def print_stats(db):
     stats = {
-        "departments": db.scalar(select(func.count(DepartmentModel.id))),
-        "categories": db.scalar(select(func.count(CategoryModel.id))),
-        "users": db.scalar(select(func.count(UserModel.id))),
-        "tickets": db.scalar(select(func.count(TicketModel.id))),
+        "departments": db.scalar(select(func.count(ctx["DepartmentModel"].id))),
+        "categories": db.scalar(select(func.count(ctx["CategoryModel"].id))),
+        "users": db.scalar(select(func.count(ctx["UserModel"].id))),
+        "tickets": db.scalar(select(func.count(ctx["TicketModel"].id))),
         "kb_documents": db.scalar(select(func.count(KbDocumentModel.id))),
         "kb_chunks": db.scalar(select(func.count(KbChunkModel.id))),
-        "kb_eval_cases": db.scalar(select(func.count(KbEvalCaseModel.id))),
-        "ai_usage_logs": db.scalar(select(func.count(AiUsageLogModel.id))),
-        "audit_logs": db.scalar(select(func.count(AuditLogModel.id))),
-        "notifications": db.scalar(select(func.count(NotificationModel.id))),
-        "follow_up_tasks": db.scalar(select(func.count(FollowUpTaskModel.id))),
+        "kb_eval_cases": db.scalar(select(func.count(ctx["KbEvalCaseModel"].id))),
+        "ai_usage_logs": db.scalar(select(func.count(ctx["AiUsageLogModel"].id))),
+        "audit_logs": db.scalar(select(func.count(ctx["AuditLogModel"].id))),
+        "notifications": db.scalar(select(func.count(ctx["NotificationModel"].id))),
+        "follow_up_tasks": db.scalar(select(func.count(ctx["FollowUpTaskModel"].id))),
     }
     print("\n=== Database statistics after reset+seed ===")
     for key, value in stats.items():
         print(f"  {key}: {value}")
-    return stats
 
-
-def list_demo_accounts(db):
     print("\n=== Demo accounts ===")
-    users = db.scalars(select(UserModel).order_by(UserModel.role)).all()
-    for u in users:
+    for u in db.scalars(select(ctx["UserModel"]).order_by(ctx["UserModel"].role)).all():
         print(f"  username={u.username} role={u.role} display={u.display_name}")
 
-
-def list_departments(db):
     print("\n=== Departments ===")
-    depts = db.scalars(select(DepartmentModel).order_by(DepartmentModel.id)).all()
-    for d in depts:
+    for d in db.scalars(select(ctx["DepartmentModel"]).order_by(ctx["DepartmentModel"].id)).all():
         print(f"  code={d.code} name={d.name}")
 
-
-def list_public_docs(db):
     print("\n=== Public published KB docs ===")
     docs = db.scalars(select(KbDocumentModel).where(
         KbDocumentModel.visibility == "PUBLIC",
@@ -195,46 +262,6 @@ def list_public_docs(db):
     ).order_by(KbDocumentModel.id)).all()
     for d in docs:
         print(f"  id={d.id} title={d.title[:40]}")
-
-
-def main():
-    if not os.environ.get("SEED_PASSWORD"):
-        print("ERROR: SEED_PASSWORD must be set (>=12 chars)")
-        sys.exit(1)
-
-    db = SessionLocal()
-
-    print("=== Step 1: Truncate transactional data ===")
-    counts = reset_transactional_data(db)
-    for k, v in counts.items():
-        if v > 0:
-            print(f"  deleted {v} from {k}")
-
-    print("\n=== Step 2: Clean non-whitelist users ===")
-    n = clean_non_whitelist_users(db)
-    print(f"  deleted {n} non-whitelist users")
-
-    print("\n=== Step 3: Clean non-whitelist departments ===")
-    n = clean_non_whitelist_departments(db)
-    print(f"  deleted {n} non-whitelist departments")
-
-    print("\n=== Step 4: Clean non-whitelist categories ===")
-    n = clean_non_whitelist_categories(db)
-    print(f"  deleted {n} non-whitelist categories")
-
-    print("\n=== Step 5: Clean test KB docs ===")
-    n = clean_test_kb_docs(db)
-    print(f"  deleted {n} test KB docs")
-
-    print("\n=== Step 6: Re-seed demo data ===")
-    from app.seed import seed
-    result = seed()
-    print(f"  seed result: {result}")
-
-    print_stats(db)
-    list_demo_accounts(db)
-    list_departments(db)
-    list_public_docs(db)
 
     db.close()
     print("\n=== Demo reset complete (deterministic) ===")

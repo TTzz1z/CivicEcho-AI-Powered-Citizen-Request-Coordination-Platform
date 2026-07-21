@@ -58,7 +58,8 @@ export function ChatPage() {
         const result = await sendOrchestrator({ message: text, route_hint: routeHint, session_id: sessionId })
         handleOrchestratorResult(result, text)
       } catch {
-        // Fallback to language-guarded Rasa path
+        // Fallback to language-guarded Rasa path. Never present Rasa localmode
+        // acknowledgements as successful ticket creation without a real QT id.
         const bareTicketId = /^QT\d{12,16}$/i.exec(text)
         const rasaText = bareTicketId ? `/query_request_status{"ticket_id":"${bareTicketId[0].toUpperCase()}"}` : text
         const response = await sendRasaMessage(sender, rasaText)
@@ -69,9 +70,18 @@ export function ChatPage() {
             setDraft(custom.draft); setDraftMissing(custom.missing || []); setCurrentRoute('ticket_intake')
             if (!screens.md) setDrawerOpen(true)
           }
-          if (r.text || r.buttons?.length) bot.push({ id: crypto.randomUUID(), side: 'bot', text: r.text || '请选择下一步操作', buttons: r.buttons })
+          if (r.text || r.buttons?.length) {
+            bot.push({
+              id: crypto.randomUUID(),
+              side: 'bot',
+              text: sanitizeRasaFallbackText(r.text || '请选择下一步操作'),
+              buttons: r.buttons,
+              degraded: true,
+              degradeReason: 'orchestrator_unavailable',
+            })
+          }
         }
-        setMessages(m => [...m, ...(bot.length ? bot : [{ id: crypto.randomUUID(), side: 'bot' as const, text: '我已收到消息，但暂时没有可展示的回复。' }])])
+        setMessages(m => [...m, ...(bot.length ? bot : [{ id: crypto.randomUUID(), side: 'bot' as const, text: '智能助手暂时不可用，已切换降级通道。系统不会在此模式下自动创建工单。', degraded: true, degradeReason: 'orchestrator_unavailable' }])])
       }
     } catch { setFailed(text); setMessages(m => [...m, { id: crypto.randomUUID(), side: 'bot', text: '服务暂时无法连接，请稍后重试。' }]) }
     finally { setSending(false) }
@@ -164,6 +174,34 @@ function routeLabel(route: string): string {
   return map[route] || route
 }
 
+/** Rewrite legacy Rasa localmode copy that falsely implies a ticket was created. */
+function sanitizeRasaFallbackText(text: string): string {
+  const guarded = ensureChineseReply(text)
+  const hasRealTicketId = /QT\d{12,16}/i.test(guarded)
+  const claimsSuccess = /已收到您的诉求|工单已创建|请前往[“"]?我的工单|后续办理进度/.test(guarded)
+  if (claimsSuccess && !hasRealTicketId) {
+    return (
+      '智能助手暂时不可用，已切换降级通道。系统没有创建真实工单，'
+      + '“我的工单”中不会出现新记录。请稍后重试，或登录后在工单页面手动提交诉求。'
+    )
+  }
+  return guarded
+}
+
+const DEGRADE_LABELS: Record<string, string> = {
+  llm_unavailable: '当前未使用外部大模型',
+  embedding_fallback: '当前未使用外部向量模型（关键词/伪向量回退）',
+  budget_exceeded: '当日调用额度已用尽',
+  rate_limited: '请求过于频繁',
+  orchestrator_unavailable: '智能编排暂时不可用',
+  rag_failed: '检索链路异常，已降级回答',
+}
+
+function degradeBannerText(reason?: string): string | null {
+  if (!reason) return '当前回答已降级'
+  return DEGRADE_LABELS[reason] || `当前回答已降级：${reason}`
+}
+
 /** Route-specific message rendering */
 function RouteMessage({ item }: { item: ChatItem }) {
   const { route, payload, text } = item
@@ -175,7 +213,17 @@ function RouteMessage({ item }: { item: ChatItem }) {
 
   // Policy / Service guide: show structured card
   if (route === 'policy_rag' || route === 'service_guide') {
-    return <Card size="small" style={{ background: '#f8fffe', border: '1px solid #d9f0ec' }}><Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{text}</Typography.Paragraph><Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>以上为 AI 参考解答，具体以官方政策为准。如需进一步处理，可说明"我要投诉"转为工单。</Typography.Text></Card>
+    const banner = item.degraded ? degradeBannerText(item.degradeReason) : null
+    return (
+      <Card size="small" style={{ background: '#f8fffe', border: '1px solid #d9f0ec' }}>
+        {banner && <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={banner} />}
+        {payload?.no_evidence === true && (
+          <Alert type="info" showIcon style={{ marginBottom: 10 }} message="未找到可引用政策依据，以下为引导说明，不是政策原文。" />
+        )}
+        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{text}</Typography.Paragraph>
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>以上为 AI 参考解答，具体以官方政策为准。如需进一步处理，可说明"我要投诉"转为工单。</Typography.Text>
+      </Card>
+    )
   }
 
   // Ticket progress: show timeline style
@@ -191,7 +239,13 @@ function RouteMessage({ item }: { item: ChatItem }) {
 function MessageMetaTags({ item }: { item: ChatItem }) {
   const tags: React.ReactNode[] = []
   if (item.cacheHit) tags.push(<Tag key="cache" color="green" style={{ fontSize: 11 }}>缓存命中</Tag>)
-  if (item.degraded) tags.push(<Tag key="deg" color="orange" style={{ fontSize: 11 }}>已降级{item.degradeReason ? `：${item.degradeReason}` : ''}</Tag>)
+  if (item.degraded) {
+    tags.push(
+      <Tag key="deg" color="orange" style={{ fontSize: 11 }}>
+        {degradeBannerText(item.degradeReason)}
+      </Tag>,
+    )
+  }
   if (item.rateLimited) tags.push(<Tag key="rl" color="red" style={{ fontSize: 11 }}>已限流</Tag>)
   if (item.budgetExceeded) tags.push(<Tag key="bud" color="volcano" style={{ fontSize: 11 }}>额度已满</Tag>)
   if (item.requiresLlm && item.modelTier && item.modelTier !== 'rules') {

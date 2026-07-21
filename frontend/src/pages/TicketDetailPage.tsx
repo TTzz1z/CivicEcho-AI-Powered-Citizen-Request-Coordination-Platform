@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-  acceptTicket, assignTicket, closeTicket, getTicket, pauseTicketSla, rejectTicket, remindTicket, resolveTicket,
+  acceptTicket, assignTicket, closeTicket, getTicket, pauseTicketSla, rejectTicket, remindTicket,
   requestTicketSupplement, resumeTicketSla, submitTicketFeedback, submitTicketSupplement, ticketAction, ticketKeys, updateContact,
 } from '../api/tickets'
 import { listCategories, listDepartments, listUsers } from '../api/admin'
@@ -19,7 +19,7 @@ import { WorkOrderPanel } from '../components/WorkOrderPanel'
 import { AiCaseAssistant } from '../components/AiCaseAssistant'
 import type { FeedbackRating, Priority } from '../types'
 
-type Action = 'accept'|'reject'|'assign'|'process'|'note'|'resolve'|'close'|'contact'|'feedback'|'pause_sla'|'resume_sla'|'remind'|'request_supplement'|'submit_supplement'
+type Action = 'accept'|'reject'|'assign'|'process'|'note'|'close'|'contact'|'feedback'|'pause_sla'|'resume_sla'|'remind'|'request_supplement'|'submit_supplement'
 type ActionFormValues = {
   remark?:string; department_id?:number; assigned_user_id?:number; contact?:string;
   resolution_summary?:string; resolution_measures?:string; resolution_outcome?:string;
@@ -32,7 +32,7 @@ type ActionFormValues = {
 
 const labels:Record<Action,string> = {
   accept:'受理工单', reject:'不予受理', assign:'派发部门', process:'开始处理',
-  note:'添加内部处理记录', resolve:'提交处理结果', close:'管理员代办结',
+  note:'添加内部处理记录', close:'管理员代办结',
   contact:'修改联系方式', feedback:'确认结果并评价',
   pause_sla:'暂停 SLA 计时',resume_sla:'恢复 SLA 计时',remind:'催办工单',
   request_supplement:'退回市民补充材料',submit_supplement:'提交补充材料',
@@ -68,7 +68,6 @@ export function TicketDetailPage(){
       if(active==='accept') return acceptTicket(t.ticket_id,{version:t.version,remark,category_id:v.category_id,priority:v.priority!})
       if(active==='assign') return assignTicket(t.ticket_id,{version:t.version,remark,department_id:v.department_id!,assigned_user_id:v.assigned_user_id})
       if(active==='contact') return updateContact(t.ticket_id,{version:t.version,remark,contact:v.contact})
-      if(active==='resolve') return resolveTicket(t.ticket_id,{version:t.version,remark,resolution_summary:v.resolution_summary!,resolution_measures:v.resolution_measures!,resolution_outcome:v.resolution_outcome!,public_reply:v.public_reply!,internal_note:v.internal_note})
       if(active==='reject') return rejectTicket(t.ticket_id,{version:t.version,remark,reason_code:v.reason_code!,rejection_detail:v.rejection_detail!,suggested_channel:v.suggested_channel,needs_supplement:v.needs_supplement||false})
       if(active==='close') return closeTicket(t.ticket_id,{version:t.version,remark,override_reason:v.override_reason!})
       if(active==='feedback') return submitTicketFeedback(t.ticket_id,{version:t.version,rating:v.rating!,comment:v.comment})
@@ -86,7 +85,7 @@ export function TicketDetailPage(){
   if(query.isError||!query.data)return <ErrorState error={query.error} retry={()=>query.refetch()}/>
   const t=query.data; let actions=allowedActions(user?.role,t.status);if(t.sla_paused_at)actions=actions.map(a=>a==='pause_sla'?'resume_sla':a)
   const isMultiDepartment=t.work_orders.length>1||t.work_orders.some(order=>order.task_type!=='primary')
-  if(isMultiDepartment&&['department_staff','admin'].includes(user?.role||''))actions=actions.filter(a=>!['process','note','resolve'].includes(a))
+  if(isMultiDepartment&&['department_staff','admin'].includes(user?.role||''))actions=actions.filter(a=>!['process','note'].includes(a))
   if(['agent','admin'].includes(user?.role||'')&&['pending','accepted'].includes(t.status)&&t.collaboration_status!=='awaiting_citizen')actions.push('request_supplement')
   if(user?.role==='citizen'&&t.collaboration_status==='awaiting_citizen')actions=['submit_supplement',...actions.filter(a=>a!=='contact')]
   const openAction=(action:Action)=>{form.resetFields();if(action==='feedback')form.setFieldsValue({rating:'satisfied'});if(action==='reject')form.setFieldsValue({needs_supplement:false});if(action==='accept')form.setFieldsValue({priority:'normal'});if(action==='assign'){const category=categories.data?.find(c=>c.id===t.category_id);form.setFieldsValue({department_id:category?.default_department_id||undefined})}setActive(action)}
@@ -94,7 +93,7 @@ export function TicketDetailPage(){
   return <>
     <PageHeader eyebrow="TICKET DETAIL" title={t.ticket_id} description={`版本 ${t.version} · 最后更新 ${dayjs(t.updated_at).format('YYYY-MM-DD HH:mm')}`} extra={<Space><Button onClick={()=>nav(-1)}>返回列表</Button><TicketStatusTag status={t.status} label={t.status_label}/></Space>}/>
     {t.collaboration_status==='awaiting_citizen'&&<Alert showIcon type="warning" message="工单正在等待市民补充材料" description={t.supplement_reason} style={{marginBottom:20}}/>}
-    {actions.length>0&&<Card className="surface" style={{marginBottom:20}}><div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','resolve','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{actionLabel(a)}</Button>)}</div></Card>}
+    {actions.length>0&&<Card className="surface" style={{marginBottom:20}}><div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{actionLabel(a)}</Button>)}</div></Card>}
     <div className="detail-grid"><div>
       <Card title="诉求内容" className="surface detail-card"><div className="description-block">{t.description}</div><Divider/><Descriptions column={{xs:1,sm:2}} items={[
         {key:'type',label:'诉求类型',children:t.request_type},{key:'category',label:'三级分类',children:t.category_path||'待坐席确认'},
@@ -135,7 +134,6 @@ export function TicketDetailPage(){
         {active==='accept'&&<><Alert type="info" showIcon message="市民填写的紧急程度仅作参考；分类和最终优先级由坐席确认，并据此生成 SLA。" style={{marginBottom:16}}/><Form.Item name="category_id" label="末级诉求分类" rules={[{required:true,message:'请选择末级诉求分类'}]}><Select showSearch optionFilterProp="label" options={categories.data?.filter(c=>c.is_active&&!categories.data?.some(child=>child.parent_id===c.id&&child.is_active)).map(c=>({value:c.id,label:`${c.name} · ${c.code}`}))}/></Form.Item><Form.Item name="priority" label="确认优先级" rules={[{required:true}]}><Select options={[{value:'normal',label:'普通'},{value:'expedited',label:'加急'},{value:'urgent',label:'紧急'},{value:'major',label:'重大事件'}]}/></Form.Item></>}
         {active==='assign'&&<><Form.Item name="department_id" label="责任部门" rules={[{required:true,message:'请选择责任部门'}]}><Select options={departments.data?.filter(d=>d.is_active).map(d=>({value:d.id,label:d.name}))}/></Form.Item><Form.Item name="assigned_user_id" label="承办人（可选）"><Select allowClear options={users.data?.filter(u=>u.role==='department_staff'&&u.is_active).map(u=>({value:u.id,label:u.display_name}))}/></Form.Item></>}
         {active==='contact'&&<Form.Item name="contact" label="新联系方式"><Input placeholder="手机号或其他有效联系方式"/></Form.Item>}
-        {active==='resolve'&&<><Alert type="info" showIcon message="公开答复和处理结果将展示给市民；内部备注仅工作人员可见。" style={{marginBottom:16}}/><Form.Item name="resolution_summary" label="处理结果摘要" rules={[{required:true,message:'请填写结果摘要'},{min:2}]}><Input maxLength={500} showCount/></Form.Item><Form.Item name="resolution_measures" label="处理措施" rules={[{required:true,message:'请填写采取的处理措施'},{min:2}]}><Input.TextArea rows={3} maxLength={5000} showCount/></Form.Item><Form.Item name="resolution_outcome" label="解决情况" rules={[{required:true,message:'请选择解决情况'}]}><Select options={Object.entries(outcomeLabels).map(([value,label])=>({value,label}))}/></Form.Item><Form.Item name="public_reply" label="对市民公开答复" rules={[{required:true,message:'请填写对市民的公开答复'},{min:2}]}><Input.TextArea rows={4} maxLength={5000} showCount/></Form.Item><Form.Item name="internal_note" label="内部备注（可选）"><Input.TextArea rows={3} maxLength={5000} showCount/></Form.Item></>}
         {active==='reject'&&<><Form.Item name="reason_code" label="不予受理标准原因" rules={[{required:true,message:'请选择标准原因'}]}><Select options={Object.entries(reasonLabels).map(([value,label])=>({value,label}))}/></Form.Item><Form.Item name="rejection_detail" label="对市民的详细说明" rules={[{required:true,message:'请填写详细说明'},{min:2}]}><Input.TextArea rows={4} maxLength={2000} showCount/></Form.Item><Form.Item name="suggested_channel" label="建议办理渠道（可选）"><Input maxLength={500} showCount/></Form.Item><Form.Item name="needs_supplement" label="需要市民补充材料" valuePropName="checked"><Switch/></Form.Item></>}
         {active==='close'&&<><Alert type="warning" showIcon message="市民尚未确认。管理员代办结必须说明依据，原因将对市民公开。" style={{marginBottom:16}}/><Form.Item name="override_reason" label="代办结原因" rules={[{required:true,message:'请填写管理员代办结原因'},{min:2}]}><Input.TextArea rows={4} maxLength={2000} showCount/></Form.Item></>}
         {active==='feedback'&&<><Alert type="info" showIcon message="满意或基本满意将直接办结；不满意将记录意见，如需重新办理请提交申诉。" style={{marginBottom:16}}/><Form.Item name="rating" label="满意度" rules={[{required:true,message:'请选择满意度'}]}><Select options={Object.entries(ratingLabels).map(([value,label])=>({value,label}))}/></Form.Item><Form.Item noStyle dependencies={['rating']}>{({getFieldValue})=><Form.Item name="comment" label={getFieldValue('rating')==='dissatisfied'?'不满意原因':'评价内容（可选）'} rules={getFieldValue('rating')==='dissatisfied'?[{required:true,message:'请说明不满意的原因'},{min:2}]:[]}><Input.TextArea rows={4} maxLength={2000} showCount/></Form.Item>}</Form.Item></>}

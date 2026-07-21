@@ -15,7 +15,7 @@ flowchart LR
     B -->|"附件对象"| M[("MinIO / S3")]
     B -->|"语义检索 chunks"| P
     B -.->|"OpenAI 兼容\nDeepSeek chat/completions"| AI["DeepSeek LLM"]
-    B -.->|"embedding\nSiliconFlow text-embedding-v1"| EMB["SiliconFlow Embedding\n1024 维"]
+    B -.->|"embedding\nSiliconFlow text-embedding-v1\n(无 Key 时 hash fallback)"| EMB["SiliconFlow Embedding\n1024 维"]
     W["Worker\nSLA 扫描 + 通知 outbox + 限流清理"] -->|"共享库"| P
     B -.->|"生产启用"| CV["ClamAV 附件扫描"]
     CADDY["Caddy\n生产 HTTPS 反代"] -.-> F

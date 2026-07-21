@@ -10,7 +10,7 @@
 docker compose ps
 
 # 3. 一键重置演示数据
-SEED_PASSWORD=tingting-seed-demo-2026 docker exec -w /app tingting-assistant-backend-1 python -m scripts.demo_reset
+SEED_PASSWORD=tingting-seed-demo-2026 CONFIRM_DEMO_RESET=YES docker exec -w /app -e SEED_PASSWORD -e CONFIRM_DEMO_RESET tingting-assistant-backend-1 python -m scripts.demo_reset --confirm-reset
 ```
 
 预期输出：清理事务表（tickets/notifications/ai_usage_logs/audit_logs 等）+ 重新 Seed 4 账号 + 演示 KB 文档。打开 `http://localhost:8080`，准备四个无痕窗口。
@@ -195,6 +195,6 @@ SEED_PASSWORD=tingting-seed-demo-2026 docker exec -w /app tingting-assistant-bac
 - 页面打不开：`docker compose ps` 确认 8 服务 healthy；`docker compose logs backend` 查错误。
 - AI 调用超时：系统自动降级规则，AI 卡片 `provider` 变为 `rules`，演示不中断。
 - 端口冲突：只改 `.env` 的 `FRONTEND_PORT`，不改容器内端口。
-- 演示数据脏：再次执行 `python -m scripts.demo_reset`。
+- 演示数据脏：再次执行 `python -m scripts.demo_reset --confirm-reset`（需 `CONFIRM_DEMO_RESET=YES`）。
 - Rasa 首次加载慢：`docker compose logs rasa`，确认模型文件 `tingting-v1.3.0.tar.gz`。
 - 不在现场执行 `docker compose down -v`，会删除数据库与 MinIO 卷。

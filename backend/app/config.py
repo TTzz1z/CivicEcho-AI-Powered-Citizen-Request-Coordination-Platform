@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     ai_max_tokens: int = 1024
     # --- Knowledge Base / RAG ---
     embedding_api_key: str | None = None
-    embedding_base_url: str = "https://api.deepseek.com"
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
     embedding_model: str = "text-embedding-v1"
     embedding_dimensions: int = 1024
     embedding_timeout_seconds: int = 30
@@ -99,10 +99,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_weak_production_secrets(self):
-        if self.malware_scan_mode not in {"disabled", "http"}:
-            raise ValueError("MALWARE_SCAN_MODE must be disabled or http")
-        if self.malware_scan_mode == "http" and not self.malware_scan_url:
-            raise ValueError("MALWARE_SCAN_URL is required when MALWARE_SCAN_MODE=http")
+        if self.malware_scan_mode not in {"disabled", "http", "clamd"}:
+            raise ValueError("MALWARE_SCAN_MODE must be disabled, http, or clamd")
+        if self.malware_scan_mode in {"http", "clamd"} and not self.malware_scan_url:
+            raise ValueError("MALWARE_SCAN_URL is required when malware scanning is enabled")
         if self.attachment_max_bytes <= 0 or self.attachment_image_max_bytes <= 0:
             raise ValueError("attachment size limits must be positive")
         if self.ai_provider not in {"rules", "deepseek"}:
@@ -125,8 +125,15 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL contains a weak/default password")
         if not self.allowed_origins or "*" in self.allowed_origins:
             raise ValueError("CORS_ORIGINS must be an explicit production allowlist")
-        if self.malware_scan_mode != "http" or not self.malware_scan_url or not self.malware_scan_require_clean:
-            raise ValueError("production requires HTTP malware scanning and MALWARE_SCAN_REQUIRE_CLEAN=true")
+        if (
+            self.malware_scan_mode not in {"http", "clamd"}
+            or not self.malware_scan_url
+            or not self.malware_scan_require_clean
+        ):
+            raise ValueError(
+                "production requires MALWARE_SCAN_MODE=http|clamd, MALWARE_SCAN_URL, "
+                "and MALWARE_SCAN_REQUIRE_CLEAN=true"
+            )
         if not self.object_storage_secure:
             raise ValueError("OBJECT_STORAGE_SECURE must be true in production")
         storage_values = f"{self.object_storage_access_key} {self.object_storage_secret_key}".lower()

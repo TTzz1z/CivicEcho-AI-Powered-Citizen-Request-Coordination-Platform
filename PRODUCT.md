@@ -18,8 +18,9 @@
 | 工单进度查询 | 是（本人工单） | 是（协调范围） | 是（本部门） | 是（全部） |
 | 受理 / 拒绝 / 派发 | 否 | 是 | 否 | 是 |
 | 部门处理 / 退回 / 转派 | 否 | 协调 | 是（本部门） | 是 |
-| 提交处理结果（resolve） | 否 | 否 | 是（本部门） | 是 |
-| 复核办结（resolved→closed） | 是（通过 feedback satisfied） | 是（review_resolve 后由 citizen feedback 或 admin close） | 否 | 是（代办结） |
+| 提交处理结果（部门 work order submit） | 否 | 否 | 是（本部门任务） | 是 |
+| 复核办结（review-resolve → resolved） | 否 | 是 | 否 | 是（紧急旁路仍保留 deprecated `/resolve`） |
+| 市民确认关闭（feedback satisfied → closed） | 是（本人工单） | 否 | 否 | 是（代办结 close） |
 | 市民确认 / 评价 / 申诉 | 是（本人工单） | 否 | 否 | 管理审核 |
 | 知识库上传 / 审核 / 发布 | 否 | 否 | 是（本部门文档） | 是 |
 | 用户 / 部门 / 分类 / SLA 管理 | 否 | 否 | 否 | 是 |

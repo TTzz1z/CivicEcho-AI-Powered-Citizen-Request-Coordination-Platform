@@ -193,8 +193,13 @@ def add_note(ticket_id: str, payload: TicketAction, principal: Principal = Depen
     return SuccessResponse(data=service.add_note(ticket_id, payload.version, payload.remark, principal))
 
 
-@router.post("/{ticket_id}/resolve", response_model=SuccessResponse[TicketRead], response_model_exclude_none=True)
+@router.post("/{ticket_id}/resolve", response_model=SuccessResponse[TicketRead], response_model_exclude_none=True, deprecated=True)
 def resolve(ticket_id: str, payload: TicketResolve, principal: Principal = Depends(get_user_principal), service: TicketService = Depends(get_service)):
+    """Deprecated legacy resolve path.
+
+    Prefer work-order submit → summary → ``/review-resolve``. This endpoint remains
+    only as an emergency admin override for single-department tickets.
+    """
     return SuccessResponse(data=service.resolve(
         ticket_id, payload.version, payload.remark, payload.resolution_summary,
         payload.resolution_measures, payload.resolution_outcome, payload.public_reply,

@@ -130,13 +130,19 @@ class ActionOpenIncident(Action):
             return [AllSlotsReset(), SlotSet("previous_email", email)]
 
         if localmode:
+            # Round-1 credibility fix: never claim a ticket was created unless
+            # Backend/ServiceNow returned a real ticket id. Localmode only
+            # acknowledges the captured draft fields and redirects users to the
+            # official Orchestrator ticket intake path.
             message = (
-                f"已收到您的诉求信息（本地演示模式）：\n"
-                f"联系邮箱：{email}\n"
-                f"问题描述：{problem_description}\n"
-                f"问题概要：{incident_title}\n"
-                f"紧急程度：{priority}\n"
-                f"请前往“我的工单”查看后续办理进度。"
+                "当前对话通道处于降级演示模式，系统没有创建真实工单，"
+                "“我的工单”中也不会出现新记录。\n"
+                f"已记录的草稿信息：\n"
+                f"- 联系邮箱：{email}\n"
+                f"- 问题描述：{problem_description}\n"
+                f"- 问题概要：{incident_title}\n"
+                f"- 紧急程度：{priority}\n"
+                "请稍后重试智能助手，或登录后在工单页面手动提交诉求。"
             )
         else:
             snow_priority = snow.priority_db().get(priority)
@@ -200,9 +206,10 @@ class ActionCheckIncidentStatus(Action):
             "Closed": "已办结",
         }
         if localmode:
-            status = incident_states["New"]
             message = (
-                f"当前为本地演示模式。邮箱 {email} 对应的最新工单状态为：{status}。"
+                "当前对话通道处于降级演示模式，无法查询真实工单状态。"
+                f"请登录后在“我的工单”查看，或提供工单编号（如 QT…）。"
+                f"（本次查询邮箱：{email}）"
             )
         else:
             incidents_result = snow.retrieve_incidents(email)

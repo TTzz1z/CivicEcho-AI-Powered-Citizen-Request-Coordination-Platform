@@ -57,7 +57,7 @@ playwright-output.txt
 
 # ----- Root-level stray Node artifacts (R5 cleanup) -----
 node_modules/
-package-lock.json
+/package-lock.json
 
 # ----- Logs / backups / temp -----
 *.log

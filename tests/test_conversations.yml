@@ -20,7 +20,6 @@ stories:
     user: |-
       hello
   - action: utter_greet
-  - action: utter_help
   - intent: open_incident
     user: |-
       I need to open an incident
@@ -45,7 +44,6 @@ stories:
     user: |-
       hello
   - action: utter_greet
-  - action: utter_help
   - intent: problem_email
     user: |-
       I have a problem with my email
@@ -73,7 +71,6 @@ stories:
     user: |-
       Hey there
   - action: utter_greet
-  - action: utter_help
   - intent: thank
     user: |-
       Awesome, thanks!
@@ -119,7 +116,6 @@ stories:
     user: |-
       Hey there
   - action: utter_greet
-  - action: utter_help
   - intent: incident_status
     user: |-
       Can you check the status of my incident
@@ -128,161 +124,52 @@ stories:
   - active_loop: null
   - action: action_check_incident_status
 
-- story: Chinese complaint registration succeeds
+- story: Chinese complaint triggers draft extraction
   steps:
   - intent: submit_complaint
     user: |-
       幸福社区的垃圾三天没人清理
     entities:
     - location: 幸福社区
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 投诉
-    - description: 幸福社区的垃圾三天没人清理
-    - location: 幸福社区
-  - action: public_request_form
-  - active_loop: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-  - slot_was_set:
-    - confirmation_pending: true
-  - intent: affirm
-  - action: action_create_public_request
+  - action: action_extract_request_draft
 
-- story: Chinese suggestion registration succeeds
+- story: Chinese suggestion triggers draft extraction
   steps:
   - intent: submit_suggestion
     user: |-
       希望幸福路增加一个公交站
     entities:
     - location: 幸福路
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 建议
-    - description: 希望幸福路增加一个公交站
-    - location: 幸福路
-  - action: public_request_form
-  - active_loop: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-  - slot_was_set:
-    - confirmation_pending: true
-  - intent: affirm
-  - action: action_create_public_request
+  - action: action_extract_request_draft
 
-- story: Chinese consultation registration succeeds
+- story: Chinese consultation triggers draft extraction
   steps:
   - intent: policy_consultation
     user: |-
       办理居住证需要什么材料
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 咨询
-    - description: 办理居住证需要什么材料
-  - action: public_request_form
-  - active_loop: public_request_form
-  - intent: provide_information
-    user: |-
-      不适用
-  - slot_was_set:
-    - location: 不适用
-  - action: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-  - slot_was_set:
-    - confirmation_pending: true
-  - intent: affirm
-  - action: action_create_public_request
+  - action: action_extract_request_draft
 
-- story: Chinese help registration succeeds
+- story: Chinese help triggers draft extraction
   steps:
   - intent: request_help
     user: |-
       和平社区老人行动不便需要上门办理
     entities:
     - location: 和平社区
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 求助
-    - description: 和平社区老人行动不便需要上门办理
-    - location: 和平社区
-  - action: public_request_form
-  - active_loop: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-  - slot_was_set:
-    - confirmation_pending: true
-  - intent: affirm
-  - action: action_create_public_request
+  - action: action_extract_request_draft
 
-- story: Chinese request asks for missing location
+- story: Chinese draft extraction followed by ticket query
   steps:
   - intent: submit_complaint
     user: |-
-      垃圾已经三天没人清理
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 投诉
-    - description: 垃圾已经三天没人清理
-  - action: public_request_form
-  - active_loop: public_request_form
-  - intent: provide_information
-    user: |-
-      幸福社区
-  - slot_was_set:
+      幸福社区垃圾无人清理
+    entities:
     - location: 幸福社区
-  - action: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-
-- story: Chinese request does not ask for known location
-  steps:
-  - intent: submit_complaint
+  - action: action_extract_request_draft
+  - intent: query_request_status
     user: |-
-      人民路井盖坏了
-    entities:
-    - location: 人民路
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 投诉
-    - description: 人民路井盖坏了
-    - location: 人民路
-  - action: public_request_form
-  - active_loop: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-
-- story: Chinese request summary denied and location corrected
-  steps:
-  - intent: deny
-  - action: action_request_public_request_correction
-  - slot_was_set:
-    - correction_pending: true
-  - intent: provide_information
-    user: |-
-      地点改成和平路小学门口
-    entities:
-    - location: 和平路小学门口
-  - slot_was_set:
-    - location: 和平路小学门口
-  - action: action_apply_public_request_correction
-  - action: action_prepare_request_summary
-
-- story: Chinese active registration is cancelled
-  steps:
-  - intent: submit_complaint
-    user: |-
-      垃圾没人清理
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 投诉
-    - description: 垃圾没人清理
-  - action: public_request_form
-  - active_loop: public_request_form
-  - intent: cancel_request
-  - action: action_deactivate_loop
-  - active_loop: null
-  - action: action_reset_public_request
+      查询刚才的工单状态
+  - action: action_query_public_request
 
 - story: Chinese public request status query with id
   steps:
@@ -293,33 +180,6 @@ stories:
     - ticket_id: QT202607130001
   - slot_was_set:
     - ticket_id: QT202607130001
-  - action: action_query_public_request
-
-- story: Chinese created request is queried in the same conversation
-  steps:
-  - intent: submit_complaint
-    user: |-
-      幸福社区垃圾无人清理
-    entities:
-    - location: 幸福社区
-  - action: action_start_public_request
-  - slot_was_set:
-    - request_type: 投诉
-    - description: 幸福社区垃圾无人清理
-    - location: 幸福社区
-  - action: public_request_form
-  - active_loop: public_request_form
-  - active_loop: null
-  - action: action_prepare_request_summary
-  - slot_was_set:
-    - confirmation_pending: true
-  - intent: affirm
-  - action: action_create_public_request
-  - slot_was_set:
-    - last_ticket_id: QT202607130001
-  - intent: query_request_status
-    user: |-
-      查询刚才的工单状态
   - action: action_query_public_request
 
 - story: Chinese status query asks for missing id then queries

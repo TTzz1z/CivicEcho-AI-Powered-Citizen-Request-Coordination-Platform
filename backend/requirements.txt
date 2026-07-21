@@ -9,7 +9,7 @@ pwdlib[argon2]==0.2.1
 minio==7.2.15
 python-multipart==0.0.31
 pgvector==0.3.6
-pypdf==5.4.0
+pypdf==6.14.2
 python-docx==1.1.2
-markdown==3.7
+markdown==3.10.2
 beautifulsoup4==4.12.3

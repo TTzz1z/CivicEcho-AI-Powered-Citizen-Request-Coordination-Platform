@@ -183,6 +183,30 @@ jobs:
       || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Workflow-level env (tingting_ci / weak "password" tokens) overrides --env-file.
+    # Pin production-compose secrets here so compose interpolation matches .env.prod.
+    env:
+      POSTGRES_DB: tingting
+      POSTGRES_USER: tingting
+      POSTGRES_PASSWORD: CiProdPgSecret9f3a2b7c1d4e5f60
+      JWT_SECRET: ci-prod-jwt-secret-at-least-32-characters-long
+      SERVICE_API_TOKEN: ci-prod-service-token-at-least-32-chars
+      SEED_PASSWORD: CI-Seed-Only-From-Workflow-2026!
+      MINIO_ROOT_USER: ciProdMinioUser
+      MINIO_ROOT_PASSWORD: CiProdMinioSecret9f3a2b7c1d4e
+      OBJECT_STORAGE_ACCESS_KEY: ciProdMinioUser
+      OBJECT_STORAGE_SECRET_KEY: CiProdMinioSecret9f3a2b7c1d4e
+      OBJECT_STORAGE_ENDPOINT: minio:9000
+      OBJECT_STORAGE_BUCKET: tingting-attachments
+      KB_UPLOAD_BUCKET: tingting-kb
+      OBJECT_STORAGE_SECURE: "false"
+      CORS_ORIGINS: https://localhost
+      APP_ENV: production
+      MALWARE_SCAN_MODE: clamd
+      MALWARE_SCAN_URL: clamav:3310
+      MALWARE_SCAN_REQUIRE_CLEAN: "true"
+      COMPOSE_HTTP_TIMEOUT: "600"
+      DOCKER_CLIENT_TIMEOUT: "600"
     steps:
       - uses: actions/checkout@v4
       - name: Write .env.prod for CI
@@ -213,9 +237,6 @@ jobs:
       - name: Validate production compose
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod config -q
       - name: Start production compose
-        env:
-          COMPOSE_HTTP_TIMEOUT: "600"
-          DOCKER_CLIENT_TIMEOUT: "600"
         run: |
           set -eux
           compose() {
@@ -237,7 +258,8 @@ jobs:
           fi
           infra_ready=0
           for i in $(seq 1 60); do
-            pg_ok=$(compose exec -T postgres pg_isready -U tingting -d tingting >/dev/null 2>&1 && echo 1 || echo 0)
+            # pg_isready can return 0 before the role/db exist; require a real SQL probe.
+            pg_ok=$(compose exec -T postgres psql -U tingting -d tingting -tAc 'SELECT 1' >/dev/null 2>&1 && echo 1 || echo 0)
             minio_ok=$(compose exec -T minio curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && echo 1 || echo 0)
             clam_ok=$(compose exec -T clamav python -c "import socket; s=socket.create_connection(('127.0.0.1',3310),2); s.close()" >/dev/null 2>&1 && echo 1 || echo 0)
             if [ "$pg_ok" = "1" ] && [ "$minio_ok" = "1" ] && [ "$clam_ok" = "1" ]; then

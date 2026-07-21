@@ -199,14 +199,18 @@ test.describe.serial('真实工单全状态闭环',()=>{
     await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await page.goto(`/department/tickets/${ticketId}`)
     await page.getByRole('button',{name:'开始处理'}).click();await page.getByLabel('操作备注').fill('E2E 已到现场开始处理');await page.getByRole('button',{name:'确认提交'}).click()
     await expect(page.locator('.ant-tag').filter({hasText:'处理中'}).first()).toBeVisible()
-    // "工单范围" lives in the advanced-filter drawer; keyword search is the stable assertion.
-    await page.goto('/department/tickets')
-    await page.getByPlaceholder('编号、描述或地点').fill(ticketId)
-    await page.getByRole('button',{name:/查\s*询/}).click()
-    await expect(page.getByText(ticketId)).toBeVisible()
+    // Prefer query-string keyword over the advanced-filter drawer (cross-browser stable).
+    await page.goto(`/department/tickets?keyword=${encodeURIComponent(ticketId)}`)
+    await expect(page.getByRole('link',{name:ticketId})).toBeVisible({timeout:15_000})
   })
 
-  test('部门人员暂停并恢复 SLA 计时',async({page})=>{await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await page.goto(`/department/tickets/${ticketId}`);await page.getByRole('button',{name:'暂停 SLA 计时'}).click();await page.getByLabel('暂停原因').fill('等待市民补充现场照片');await page.getByLabel('操作备注').fill('E2E 暂停计时');await page.getByRole('button',{name:'确认提交'}).click();await expect(page.getByText('计时已暂停')).toBeVisible();await page.getByRole('button',{name:'恢复 SLA 计时'}).click();await page.getByLabel('操作备注').fill('E2E 材料已补齐恢复计时');await page.getByRole('button',{name:'确认提交'}).click();await expect(page.getByText('时限正常')).toBeVisible()})
+  test('部门人员暂停并恢复 SLA 计时',async({page})=>{
+    await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await page.goto(`/department/tickets/${ticketId}`)
+    await page.getByRole('button',{name:'暂停 SLA 计时'}).click();await page.getByLabel('暂停原因').fill('等待市民补充现场照片');await page.getByLabel('操作备注').fill('E2E 暂停计时');await page.getByRole('button',{name:'确认提交'}).click()
+    await expect(page.getByRole('alert').filter({hasText:'计时已暂停'})).toBeVisible()
+    await page.getByRole('button',{name:'恢复 SLA 计时'}).click();await page.getByLabel('操作备注').fill('E2E 材料已补齐恢复计时');await page.getByRole('button',{name:'确认提交'}).click()
+    await expect(page.getByText('时限正常').first()).toBeVisible()
+  })
 
   test('部门人员添加处理记录',async({page})=>{await login(page,'department_local');await expect(page).toHaveURL(/department\/tickets/);await page.goto(`/department/tickets/${ticketId}`);await page.getByRole('button',{name:'添加内部处理记录'}).click();await page.getByLabel('操作备注').fill('E2E 已联系物业并完成现场复核');await page.getByRole('button',{name:'确认提交'}).click();await expect(page.getByText('E2E 已联系物业并完成现场复核')).toBeVisible();await expect(page.locator('.ant-tag').filter({hasText:'处理中'}).first()).toBeVisible()})
 

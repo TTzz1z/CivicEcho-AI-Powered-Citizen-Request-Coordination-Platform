@@ -12,4 +12,9 @@ cleanup() { docker compose -p tingting-e2e down -v --remove-orphans; }
 trap cleanup EXIT INT TERM
 docker compose -p tingting-e2e up -d --build --wait
 docker compose -p tingting-e2e exec -T -e SEED_PASSWORD -e SEED_PROFILE backend python -m app.seed
-(cd frontend && npx playwright test)
+SUITE="${1:-full}"
+if [ "$SUITE" = "smoke" ]; then
+  (cd frontend && npx playwright test e2e/smoke.spec.ts --project=chromium)
+else
+  (cd frontend && npx playwright test)
+fi

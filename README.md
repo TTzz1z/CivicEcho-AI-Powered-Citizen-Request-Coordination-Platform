@@ -100,11 +100,11 @@ cd frontend; npm run lint:types
 # Vite build(OK)
 cd frontend; npm run build
 
-# Playwright Smoke(6/6 passed,~20s,日常使用)
+# Playwright Smoke(6/6 passed,~20s,日常使用; GitHub Actions CI 同此)
 cd frontend; npx playwright test e2e/smoke.spec.ts --project=chromium
 
-# Playwright 全量 E2E(96/96 passed,~20 min,预发布/面试前用)
-cd frontend; npx playwright test
+# Playwright 全量 E2E(96/96 passed,~20 min,预发布/面试前本地用)
+sh scripts/run-e2e.sh
 
 # Alembic 升降级 + 漂移检查
 docker compose exec -T backend alembic upgrade head

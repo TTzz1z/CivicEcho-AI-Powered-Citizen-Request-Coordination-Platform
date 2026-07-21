@@ -93,7 +93,7 @@ HELP_CAPABILITY_WORDS = (
 # User explicitly confirms creating a consultation ticket (after policy_rag no-evidence).
 # Only such explicit confirmation may trigger ticket_intake for a consultation.
 CREATE_CONSULTATION_TICKET_WORDS = (
-    "创建咨询工单", "建咨询工单", "提交咨询工单", "转咨询工单", "我要创建咨询工单",
+    "创建咨询工单", "创建一个咨询工单", "建咨询工单", "提交咨询工单", "转咨询工单", "我要创建咨询工单",
 )
 
 # Demand/reflect markers used to detect multi-intent scenarios

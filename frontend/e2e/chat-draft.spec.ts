@@ -75,9 +75,9 @@ test.describe('智能对话建单 - 草稿模式', () => {
   })
 
   test('政策咨询：识别为咨询，地点填不适用后提交', async ({ page }) => {
-    // r2-3: "创建咨询工单" keyword forces ticket_intake route with draft_request_type=咨询.
-    // r2-5: session_id is now per-session so prior policy messages don't bleed in.
-    await sendChatAndWait(page, '我要咨询路灯报修的具体流程，请帮我创建一个咨询工单')
+    // Explicit confirmation phrase must match CREATE_CONSULTATION_TICKET_WORDS.
+    await page.getByRole('button', { name: '新建会话' }).click()
+    await sendChatAndWait(page, '我要咨询路灯报修的具体流程，请帮我创建咨询工单')
 
     await expect(page.locator('.draft-panel')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('咨询').first()).toBeVisible()

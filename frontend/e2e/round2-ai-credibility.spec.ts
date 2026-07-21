@@ -274,14 +274,17 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
       data: { version: 3, remark: 'r2-test-9' },
     })
 
-    // Generate AI advice and submit a review decision.
-    await request.post(`/api/v1/ai/tickets/${ticketId}/case-advice`, {
+    // Generate AI advice and submit a review decision with stable advice_id.
+    const adviceRes = await request.post(`/api/v1/ai/tickets/${ticketId}/case-advice`, {
       headers: { Authorization: `Bearer ${staffToken}` },
       timeout: 60_000,
     })
+    expect(adviceRes.ok()).toBeTruthy()
+    const adviceId = (await adviceRes.json()).data.advice_id
+    expect(adviceId).toBeTruthy()
     const reviewRes = await request.post(`/api/v1/kb/tickets/${ticketId}/advice/review`, {
       headers: { Authorization: `Bearer ${staffToken}` },
-      data: { decision: 'adopted', edit_summary: '采纳 AI 建议' },
+      data: { advice_id: adviceId, decision: 'adopted', edit_summary: '采纳 AI 建议' },
     })
     expect(reviewRes.ok()).toBeTruthy()
 

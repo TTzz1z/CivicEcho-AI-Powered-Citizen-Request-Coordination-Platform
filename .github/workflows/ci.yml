@@ -157,7 +157,15 @@ jobs:
       - run: pip-audit -r backend/requirements.lock.txt
       # Sanic-Cors 2.2.0 is the latest upstream release; the Action Server is
       # loopback-only while the upstream CVE remains unfixed.
-      - run: pip-audit -r actions/requirements-actions.txt --ignore-vuln CVE-2026-37737
+      # Retry: pip-audit occasionally hits PyPI read timeouts on GHA.
+      - name: pip-audit actions requirements
+        run: |
+          for i in 1 2 3; do
+            pip-audit -r actions/requirements-actions.txt --ignore-vuln CVE-2026-37737 && exit 0
+            echo "pip-audit attempt $i failed; retrying..."
+            sleep $((i * 5))
+          done
+          exit 1
       - run: docker build -f Dockerfile.actions -t tingting-actions-security:ci .
       - run: docker run --rm --user root --entrypoint sh tingting-actions-security:ci -ec "python -m pip install --no-cache-dir pip-audit && python -m pip_audit --ignore-vuln CVE-2026-37737"
       - working-directory: frontend

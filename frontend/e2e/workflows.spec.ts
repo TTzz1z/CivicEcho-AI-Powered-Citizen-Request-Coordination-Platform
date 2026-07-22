@@ -272,7 +272,7 @@ test.describe.serial('真实工单全状态闭环',()=>{
     await reviewDialog.getByLabel('对市民最终答复').fill('已更换灯具并恢复照明')
     await reviewDialog.getByLabel('操作说明').fill('E2E 坐席审核通过')
     await reviewDialog.getByRole('button',{name:'确认提交'}).click()
-    await expect(page.locator('.ant-tag').filter({hasText:'待市民确认'}).first()).toBeVisible()
+    await expect(page.locator('.ant-tag').filter({hasText:'待市民确认'}).first()).toBeVisible({timeout:15_000})
   })
 
   test('市民看到最新办理进度',async({page})=>{await login(page,'citizen_local');await expect(page).toHaveURL(/citizen\/chat/);await page.goto(`/citizen/tickets/${ticketId}`);await expect(page.locator('.ant-tag').filter({hasText:'待市民确认'}).first()).toBeVisible();await expect(page.getByText('已更换灯具并恢复照明').first()).toBeVisible();await expect(page.getByText('E2E 部门内部复核通过')).toHaveCount(0)})

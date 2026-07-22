@@ -62,7 +62,7 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
     const departmentId=order?.department_id
     setStaffDepartment(departmentId)
     if(next==='create')form.setFieldsValue({task_type:primary?'support':'primary'})
-    if(next==='submit'||next==='summarize')form.setFieldsValue({result_outcome:'resolved',resolution_outcome:'resolved'})
+    if(next==='submit'||next==='summarize'||next==='review_resolve')form.setFieldsValue({result_outcome:'resolved',resolution_outcome:'resolved'})
   }
   const close=()=>{setMode(null);setSelected(null);setStaffDepartment(undefined);form.resetFields()}
   const mutation=useMutation({

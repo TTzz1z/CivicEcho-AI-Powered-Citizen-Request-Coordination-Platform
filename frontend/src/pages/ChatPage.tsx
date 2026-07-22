@@ -13,10 +13,17 @@ import { TicketDraftPanel, type DraftState } from '../components/TicketDraftPane
 import { ensureChineseReply } from '../utils/languageGuard'
 import {
   clearChatPrivacyOnAccountSwitch,
+  conversationDraftKey,
+  conversationMessageKey,
   loadChatDraft,
   loadChatMessages,
+  loadConversationIndex,
+  migrateLegacyChatIfNeeded,
+  removeConversation,
   saveChatDraft,
   saveChatMessages,
+  touchConversationFromMessages,
+  type ChatConversationMeta,
 } from '../utils/chatStorage'
 
 type ChatItem = { id: string; side: 'user' | 'bot'; text: string; route?: string; payload?: Record<string, unknown>; buttons?: { title: string; payload: string }[]; cacheHit?: boolean; degraded?: boolean; degradeReason?: string; rateLimited?: boolean; budgetExceeded?: boolean; requiresLlm?: boolean; modelTier?: string }
@@ -31,27 +38,35 @@ const ticketPattern = /QT\d{16}/g
 function stableSender(userId?: number) { if (userId) return `web-user-${userId}`; let id = localStorage.getItem('tingting_sender_id'); if (!id) { id = `web-anon-${crypto.randomUUID()}`; localStorage.setItem('tingting_sender_id', id) } return id }
 
 export function ChatPage() {
-  const { user } = useAuth(); const location = useLocation(); const isPublicChat = location.pathname === '/chat'; const isCitizen = user?.role === 'citizen'; const sender = useMemo(() => stableSender(user?.id), [user?.id]); const storageKey = `tingting_chat_${sender}`
-  const draftKey = `tingting_chat_draft_${sender}`
+  const { user } = useAuth(); const location = useLocation(); const isPublicChat = location.pathname === '/chat'; const isCitizen = user?.role === 'citizen'; const sender = useMemo(() => stableSender(user?.id), [user?.id])
   const screens = Grid.useBreakpoint()
-  const [messages, setMessages] = useState<ChatItem[]>(() => loadChatMessages<ChatItem>(storageKey))
-  const [input, setInput] = useState(''); const [sending, setSending] = useState(false); const [failed, setFailed] = useState<string | null>(null); const messagesViewport = useRef<HTMLDivElement>(null)
-  const [draft, setDraft] = useState<DraftState | null>(() => loadChatDraft<DraftState>(draftKey))
-  const [draftMissing, setDraftMissing] = useState<string[]>([])
-  const [dynamicFields, setDynamicFields] = useState<Record<string, unknown>[]>([])
-  const [currentRoute, setCurrentRoute] = useState<string | null>(null)
-  const [drawerOpen, setDrawerOpen] = useState(false)
   const [bindState, setBindState] = useState<BindState>('idle')
   const [boundCount, setBoundCount] = useState<number | null>(null)
   // Per-conversation id: rotate on "新建会话" so turn counters / guards / ai_usage_logs stay isolated.
   // Kept in sessionStorage so a refresh continues the same conversation.
   const [sessionId, setSessionId] = useState<string>(() => {
-    const key = `tingting_session_${sender}`
+    const key = `tingting_session_${stableSender(user?.id)}`
     const existing = sessionStorage.getItem(key)
     if (existing) return existing
     const id = crypto.randomUUID()
     sessionStorage.setItem(key, id)
     return id
+  })
+  const storageKey = conversationMessageKey(sender, sessionId)
+  const draftKey = conversationDraftKey(sender, sessionId)
+  const [messages, setMessages] = useState<ChatItem[]>(() => {
+    migrateLegacyChatIfNeeded(sender, sessionId)
+    return loadChatMessages<ChatItem>(conversationMessageKey(sender, sessionId))
+  })
+  const [input, setInput] = useState(''); const [sending, setSending] = useState(false); const [failed, setFailed] = useState<string | null>(null); const messagesViewport = useRef<HTMLDivElement>(null)
+  const [draft, setDraft] = useState<DraftState | null>(() => loadChatDraft<DraftState>(conversationDraftKey(sender, sessionId)))
+  const [draftMissing, setDraftMissing] = useState<string[]>([])
+  const [dynamicFields, setDynamicFields] = useState<Record<string, unknown>[]>([])
+  const [currentRoute, setCurrentRoute] = useState<string | null>(null)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [conversations, setConversations] = useState<ChatConversationMeta[]>(() => {
+    migrateLegacyChatIfNeeded(sender, sessionId)
+    return loadConversationIndex(sender)
   })
 
   const prevUserIdRef = useRef<number | undefined>(user?.id)
@@ -62,10 +77,29 @@ export function ChatPage() {
       prevUserIdRef.current = user?.id
       setBindState('idle')
       setBoundCount(null)
+      const key = `tingting_session_${sender}`
+      let id = sessionStorage.getItem(key)
+      if (!id) {
+        id = crypto.randomUUID()
+        sessionStorage.setItem(key, id)
+      }
+      migrateLegacyChatIfNeeded(sender, id)
+      setSessionId(id)
+      setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, id)))
+      setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, id)))
+      setConversations(loadConversationIndex(sender))
+      setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null)
     }
-  }, [user?.id])
+  }, [user?.id, sender])
 
-  useEffect(() => { saveChatMessages(storageKey, messages); const viewport = messagesViewport.current; viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' }) }, [messages, storageKey])
+  useEffect(() => {
+    saveChatMessages(storageKey, messages)
+    if (messages.length) {
+      setConversations(touchConversationFromMessages(sender, sessionId, messages))
+    }
+    const viewport = messagesViewport.current
+    viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' })
+  }, [messages, storageKey, sender, sessionId])
   useEffect(() => { if (draft) saveChatDraft(draftKey, draft); else localStorage.removeItem(draftKey) }, [draft, draftKey])
 
   const bindAnonymous = useCallback(async () => {
@@ -191,12 +225,42 @@ export function ChatPage() {
   }
 
   const clear = () => {
-    setMessages([]); setDraft(null); setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null)
-    localStorage.removeItem(storageKey); localStorage.removeItem(draftKey)
-    // Rotate session so the new conversation does not inherit previous ticket slots / guard counters.
+    // Start a fresh conversation; keep previous non-empty threads in the sidebar history.
     const newId = crypto.randomUUID()
     sessionStorage.setItem(`tingting_session_${sender}`, newId)
     setSessionId(newId)
+    setMessages([]); setDraft(null); setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null)
+  }
+
+  const switchConversation = (id: string) => {
+    if (id === sessionId || sending) return
+    if (messages.length) {
+      saveChatMessages(storageKey, messages)
+      setConversations(touchConversationFromMessages(sender, sessionId, messages))
+    }
+    if (draft) saveChatDraft(draftKey, draft)
+    sessionStorage.setItem(`tingting_session_${sender}`, id)
+    setSessionId(id)
+    setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, id)))
+    setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, id)))
+    setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null); setDrawerOpen(false)
+  }
+
+  const deleteConversation = (id: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    const next = removeConversation(sender, id)
+    setConversations(next)
+    if (id !== sessionId) return
+    const fallback = next[0]
+    if (!fallback) {
+      clear()
+      return
+    }
+    sessionStorage.setItem(`tingting_session_${sender}`, fallback.id)
+    setSessionId(fallback.id)
+    setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, fallback.id)))
+    setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, fallback.id)))
+    setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null); setDrawerOpen(false)
   }
 
   const handleSubmitted = (ticketId: string) => {
@@ -208,7 +272,38 @@ export function ChatPage() {
   const missingCount = draft ? draftMissing.filter(f => !draft[f as keyof DraftState]).length : 0
 
   return <div className="chat-page"><PageHeader eyebrow="SMART SERVICE" title="智能对话" description="政策咨询、投诉建议、工单查询——统一入口，智能路由。" extra={isPublicChat?<Space wrap><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user&&<Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</Space>:undefined} /><div className={`chat-shell${draft && screens.md ? ' has-draft' : ''}`}>
-    <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button><Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}
+    <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button>
+      {conversations.length > 0 && (
+        <div className="chat-history" aria-label="聊天记录">
+          <Typography.Title level={5} style={{ marginTop: 20, marginBottom: 8 }}>聊天记录</Typography.Title>
+          <div className="chat-history-list">
+            {conversations.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={`chat-history-item${item.id === sessionId ? ' active' : ''}`}
+                onClick={() => switchConversation(item.id)}
+              >
+                <span className="chat-history-title">{item.title}</span>
+                {item.preview && item.preview !== item.title && (
+                  <span className="chat-history-preview">{item.preview}</span>
+                )}
+                <span
+                  className="chat-history-delete"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`删除会话 ${item.title}`}
+                  onClick={(e) => deleteConversation(item.id, e)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); deleteConversation(item.id, e as unknown as React.MouseEvent) } }}
+                >
+                  <DeleteOutlined />
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}
       <BindStatusAlert isCitizen={!!isCitizen} hasUser={!!user} bindState={bindState} boundCount={boundCount} onRetry={() => { if (user?.id) sessionStorage.removeItem(`tingting_bound_${user.id}`); void bindAnonymous() }} />
     </aside>
     <section className="chat-main" aria-label="智能对话区"><div ref={messagesViewport} className="messages" aria-live="polite">{messages.length === 0 && <div style={{ margin: 'auto', textAlign: 'center', maxWidth: 480 }}><div className="brand-mark" style={{ margin: '0 auto 18px', color: '#167c72', borderColor: '#82bdb6' }}>倾</div><Typography.Title level={3}>你好，我是倾听助手</Typography.Title><Typography.Paragraph type="secondary">我可以帮您咨询政策、提交投诉建议、查询工单进度。请直接描述您的需求。</Typography.Paragraph><Space wrap style={{ justifyContent: 'center' }}>{suggestions.map(s => <Tag key={s.hint} style={{ cursor: 'pointer', padding: '7px 11px' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Tag>)}</Space></div>}

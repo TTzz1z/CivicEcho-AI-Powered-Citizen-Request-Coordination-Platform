@@ -28,9 +28,10 @@ SYSTEM_PROMPT = """你是倾听助手 AI 辅助研判引擎，服务于政务诉
 输出必须是合法 JSON，不要包含 markdown 代码块标记。
 所有建议必须标注 advisory_only=true。
 要求：
-- 建议必须具体、可操作，指明具体部门、具体步骤、具体时限
+- 建议必须具体、可操作
 - 结合工单的类型、地点、分类等信息给出针对性分析
-- 避免笼统、模板化的表述"""
+- 避免笼统、模板化的表述
+- 不得虚构已完成的现场核查、维修或办结事实"""
 
 PROMPTS = {
     "summary": """请为以下政务工单生成结构化摘要，包含核心问题、影响范围、紧迫程度判断。
@@ -93,6 +94,65 @@ PROMPTS = {
 - 地点：{location}
 - 时间：{occurred_at_text}
 - 对象：{target}""",
+
+    "triage_assistant": """你是坐席智能分诊助手。只做受理与分派阶段分析，不得假设或编造现场处理结果。
+禁止输出：已完成维修、已现场核查、最终处理结果、部门正式办结回复、具体完成日期承诺、"已经解决/已经修复"等事实性办结表述。
+只分析：诉求摘要、分类、紧急度、信息完整性、责任部门候选、SLA 建议、受理告知语。
+输出 JSON：
+{{
+  "case_summary": {{"description": "", "location": "", "duration": "", "affected_scope": ""}},
+  "classification": {{"request_type": "", "category": "", "subcategory": "", "reason": ""}},
+  "urgency": {{"level": "normal|expedited|urgent|major", "emergency": false, "reason": ""}},
+  "completeness": {{"complete": true, "known_fields": [], "missing_fields": [], "follow_up_questions": []}},
+  "department_candidates": [{{"department_name": "", "recommendation_level": "high|medium|low", "reason": ""}}],
+  "sla_recommendation": {{"response_deadline": "", "handling_deadline": "", "reason": ""}},
+  "intake_notice_draft": "简短受理告知语，不得承诺具体办结日期",
+  "advisory_only": true
+}}
+
+工单信息：
+- 工单号：{ticket_id}
+- 状态：{status}
+- 类型：{request_type}
+- 描述：{description}
+- 地点：{location}
+- 时间：{occurred_at_text}
+- 优先级：{priority}
+- 分类：{category_name}
+- 可选部门：{departments}""",
+
+    "handling_assistant": """你是部门智能办件助手。只针对已派发到本部门的工单生成核查与文书建议，不得改变工单状态或自动办结。
+规则：
+1. 明确区分已知事实、待核实事项、建议动作。
+2. 若尚未提供真实办理事实（核查时间/结果/权属/措施/人员/结果/证据为空），reply_draft 只能是带【占位符】的模板，禁止写"已派人核查""已完成维修""将于某日完成""已恢复正常"等未核实结论。
+3. 有真实办理事实时，才可生成完整回复草稿，仍须标注人工复核。
+输出 JSON：
+{{
+  "case_summary": {{"description": "", "assigned_department": "", "classification": "", "known_facts": []}},
+  "verification_checklist": ["核查项"],
+  "handling_plan": ["办理步骤"],
+  "policy_references": ["政策或规范要点"],
+  "risk_warnings": ["SLA/协同/安全风险"],
+  "missing_handling_facts": ["缺失的办理事实字段"],
+  "collaboration_suggestions": ["协同部门建议"],
+  "evidence_checklist": ["建议留存的证据"],
+  "reply_template": "带【占位符】的回复模板",
+  "reply_draft": "有事实则完整草稿，否则与模板相同并保留占位符",
+  "facts_sufficient": false,
+  "advisory_only": true
+}}
+
+工单信息：
+- 工单号：{ticket_id}
+- 状态：{status}
+- 描述：{description}
+- 地点：{location}
+- 分类：{category_name}
+- 责任部门：{assigned_department}
+- 已有处理摘要：{resolution_summary}
+- 已有处理措施：{resolution_measures}
+- 已有公开回复：{public_reply}
+- 办理事实是否充足：{facts_sufficient}""",
 }
 
 

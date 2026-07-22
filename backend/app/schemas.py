@@ -597,16 +597,24 @@ class LoginRequest(BaseModel):
 
 
 class AiAnalyzeRequest(BaseModel):
-    suggestion_types: list[Literal["assignment", "similarity", "summary", "completeness", "document_draft", "risk"]] = Field(
-        default_factory=lambda: ["assignment", "similarity", "summary", "completeness", "document_draft", "risk"],
+    suggestion_types: list[Literal[
+        "assignment", "similarity", "summary", "completeness", "document_draft", "risk",
+        "triage_assistant", "handling_assistant",
+    ]] = Field(
+        default_factory=lambda: ["triage_assistant"],
         min_length=1,
-        max_length=6,
+        max_length=8,
     )
+    capability: Optional[Literal["triage_assistant", "handling_assistant"]] = None
 
 
 class AiReviewRequest(BaseModel):
-    decision: Literal["helpful", "not_helpful"]
+    decision: Literal[
+        "helpful", "not_helpful",
+        "adopted", "adopted_with_edits", "rejected",
+    ]
     comment: Optional[str] = Field(default=None, max_length=1000)
+    edited_content: Optional[dict] = None
 
 
 class PreReviewRequest(BaseModel):

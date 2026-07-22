@@ -20,7 +20,9 @@ def get_service(db: Session = Depends(get_db)):
 
 @router.post("/tickets/{ticket_id}/analyze", response_model=SuccessResponse[list[AiSuggestionRead]])
 def analyze(ticket_id: str, payload: AiAnalyzeRequest, principal: Principal = Depends(get_user_principal), service: AiService = Depends(get_service)):
-    return SuccessResponse(data=service.analyze(ticket_id, payload.suggestion_types, principal))
+    return SuccessResponse(data=service.analyze(
+        ticket_id, payload.suggestion_types, principal, capability=payload.capability,
+    ))
 
 
 @router.get("/tickets/{ticket_id}/suggestions", response_model=SuccessResponse[list[AiSuggestionRead]])
@@ -30,7 +32,10 @@ def list_suggestions(ticket_id: str, principal: Principal = Depends(get_user_pri
 
 @router.post("/suggestions/{suggestion_id}/review", response_model=SuccessResponse[AiSuggestionRead])
 def review(suggestion_id: str, payload: AiReviewRequest, principal: Principal = Depends(get_user_principal), service: AiService = Depends(get_service)):
-    return SuccessResponse(data=service.review(suggestion_id, payload.decision, payload.comment, principal))
+    return SuccessResponse(data=service.review(
+        suggestion_id, payload.decision, payload.comment, principal,
+        edited_content=payload.edited_content,
+    ))
 
 
 @router.get("/hotspots", response_model=SuccessResponse[list[HotspotRead]])

@@ -1,4 +1,4 @@
-import { cleanup, screen, waitFor } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -44,7 +44,8 @@ describe('ChatPage', () => {
     renderApp(<MemoryRouter><ChatPage /></MemoryRouter>)
     await userEvent.type(screen.getByLabelText('输入消息'), '我要投诉')
     await userEvent.click(screen.getByRole('button', { name: /^发送$/ }))
-    expect(await screen.findByText(/工单已创建/)).toBeInTheDocument()
+    const main = screen.getByLabelText('智能对话区')
+    expect(await within(main).findByText(/工单已创建/)).toBeInTheDocument()
     expect(sendOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ message: '我要投诉', route_hint: undefined }))
   })
 
@@ -74,7 +75,8 @@ describe('ChatPage', () => {
       expect(sendOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ message: '你能干啥' }))
     })
     expect(sendRasaMessage).not.toHaveBeenCalled()
-    expect(await screen.findByText(/工单已创建/)).toBeInTheDocument()
+    const main = screen.getByLabelText('智能对话区')
+    expect(await within(main).findByText(/工单已创建/)).toBeInTheDocument()
   })
 
   it('sanitizes rasa fallback that falsely claims ticket creation', async () => {
@@ -85,9 +87,10 @@ describe('ChatPage', () => {
     renderApp(<MemoryRouter><ChatPage /></MemoryRouter>)
     await userEvent.type(screen.getByLabelText('输入消息'), '路灯坏了')
     await userEvent.click(screen.getByRole('button', { name: /^发送$/ }))
-    expect(await screen.findByText(/系统没有创建真实工单/)).toBeInTheDocument()
-    expect(screen.queryByText(/请前往.“我的工单”.查看后续办理进度/)).not.toBeInTheDocument()
-    expect(screen.getByText(/智能编排暂时不可用|orchestrator_unavailable|当前回答已降级/)).toBeInTheDocument()
+    const main = screen.getByLabelText('智能对话区')
+    expect(await within(main).findByText(/系统没有创建真实工单/)).toBeInTheDocument()
+    expect(within(main).queryByText(/请前往.“我的工单”.查看后续办理进度/)).not.toBeInTheDocument()
+    expect(within(main).getByText(/智能编排暂时不可用|orchestrator_unavailable|当前回答已降级/)).toBeInTheDocument()
   })
 
   it('sanitizes rasa fallback that invents Incident IDs without QT ticket', async () => {

@@ -358,6 +358,26 @@ body {
 .detail-card {
   padding: 24px;
 }
+.handling-focus .ant-descriptions-item-label {
+  white-space: nowrap;
+}
+.handling-focus .ant-descriptions-item-content {
+  min-width: 0;
+}
+.handling-focus-nowrap {
+  display: inline-block;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.handling-focus-result {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+  max-width: 100%;
+}
 .description-block {
   font-size: 15px;
   line-height: 1.85;
@@ -505,6 +525,73 @@ body {
   background: #f4f8f7;
   border-right: 1px solid var(--line);
   padding: 20px;
+}
+.chat-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.chat-history-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 10px 28px 10px 12px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.chat-history-item:hover,
+.chat-history-item.active {
+  border-color: #9fcfc8;
+  background: #fff;
+}
+.chat-history-item.active {
+  box-shadow: inset 3px 0 0 #167c72;
+}
+.chat-history-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-history-preview {
+  font-size: 12px;
+  color: var(--muted, #6b7c78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-history-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: #8a9a96;
+  opacity: 0;
+}
+.chat-history-item:hover .chat-history-delete,
+.chat-history-item.active .chat-history-delete,
+.chat-history-delete:focus {
+  opacity: 1;
+}
+.chat-history-delete:hover {
+  background: #eef4f2;
+  color: #c0392b;
 }
 .chat-main {
   min-width: 0;

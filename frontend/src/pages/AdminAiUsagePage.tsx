@@ -19,6 +19,7 @@ const ROUTE_LABELS: Record<string, string> = {
   general_chat: '日常对话', human_handoff: '人工服务', clarify: '信息确认',
   out_of_scope: '范围外拦截',
   citizen_query: '市民咨询', ticket_advice: '办件助手', ai_analyze: 'AI 分析',
+  triage_assistant: '智能分诊', handling_assistant: '办件文书',
   pre_review: '预审', kb_index: '知识库索引', rag_query: 'RAG 检索',
   semantic_cache_lookup: '语义缓存',
 }
@@ -40,7 +41,9 @@ const CAPABILITY_LABELS: Record<string, string> = {
   ticket_draft: '工单草稿',
   policy_rag: '政策 RAG',
   service_guide: '办事指南',
-  ticket_advice: '办件助手',
+  ticket_advice: '办件助手(旧)',
+  triage_assistant: '智能分诊',
+  handling_assistant: '办件文书',
   ai_analyze: 'AI 分析',
   pre_review: 'AI 预审',
   embedding_index: '索引向量',

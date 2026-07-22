@@ -67,8 +67,15 @@ class PostgreSQLTicketRepository(TicketRepository):
         if query.created_to:
             statement = statement.where(TicketModel.created_at < query.created_to)
         if query.keyword:
-            pattern = f"%{query.keyword}%"
-            statement = statement.where(or_(TicketModel.description.ilike(pattern), TicketModel.location.ilike(pattern), TicketModel.event.ilike(pattern)))
+            raw = query.keyword.strip()
+            pattern = f"%{raw}%"
+            # Ticket numbers (QT…) must match ticket_id; free text still hits description/location/event.
+            statement = statement.where(or_(
+                TicketModel.ticket_id.ilike(pattern),
+                TicketModel.description.ilike(pattern),
+                TicketModel.location.ilike(pattern),
+                TicketModel.event.ilike(pattern),
+            ))
         if query.mine and principal.role != "citizen":
             mine_column = TicketModel.assigned_user_id if principal.role == "department_staff" else TicketModel.creator_user_id
             statement = statement.where(mine_column == principal.user_id)

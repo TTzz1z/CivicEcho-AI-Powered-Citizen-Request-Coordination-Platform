@@ -69,8 +69,8 @@ export type FollowUpStatus='pending'|'in_progress'|'completed'|'cancelled'
 export interface PhoneFollowUpRecord { id:string;task_id:string;ticket_id:string;caller_user_id?:number|null;caller_name?:string|null;contact_result:'reached'|'no_answer'|'wrong_number';satisfaction?:FeedbackRating|null;outcome:'confirmed'|'needs_followup'|'appeal_requested';notes:string;created_at:string }
 export interface FollowUpTask { id:string;ticket_id:string;handling_round:number;status:FollowUpStatus;assigned_user_id?:number|null;assignee_name?:string|null;due_at:string;completed_at?:string|null;created_at:string;updated_at:string;records:PhoneFollowUpRecord[] }
 export interface FollowUpPage { items:FollowUpTask[];page:number;page_size:number;total:number }
-export type AiSuggestionType='assignment'|'similarity'|'summary'|'completeness'|'document_draft'|'risk'
-export interface AiSuggestion { id:string;ticket_id:string;suggestion_type:AiSuggestionType;status:string;risk_level:'none'|'attention'|'urgent'|'sensitive';confidence:number;provider:string;model_name:string;result:Record<string,unknown>;explanation?:string|null;review_decision?:'helpful'|'not_helpful'|null;review_comment?:string|null;reviewed_at?:string|null;created_at:string;advisory_only:true }
+export type AiSuggestionType='assignment'|'similarity'|'summary'|'completeness'|'document_draft'|'risk'|'triage_assistant'|'handling_assistant'|'ticket_advice'
+export interface AiSuggestion { id:string;ticket_id:string;suggestion_type:AiSuggestionType;status:string;risk_level:'none'|'attention'|'urgent'|'sensitive';confidence:number;provider:string;model_name:string;result:Record<string,unknown>;explanation?:string|null;review_decision?:'helpful'|'not_helpful'|'adopted'|'adopted_with_edits'|'rejected'|null;review_comment?:string|null;reviewed_at?:string|null;created_at:string;advisory_only:true }
 export interface Hotspot { cluster_key:string;label:string;count:number;urgent_count:number;sample_ticket_ids:string[] }
 export interface IntegrationStatus { integration_type:string;enabled:boolean;configured:boolean;mode:string;message:string }
 

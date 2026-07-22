@@ -13,14 +13,26 @@ docker compose ps
 docker exec -w /app -e SEED_PASSWORD=tingting-seed-demo-2026 -e CONFIRM_DEMO_RESET=YES tingting-assistant-backend-1 python -m scripts.demo_reset --confirm-reset
 ```
 
-预期输出：清理事务表（tickets/notifications/ai_usage_logs/audit_logs 等）+ 重新 Seed 4 账号 + 演示 KB 文档。打开 `http://localhost:8080`，准备四个无痕窗口。
+预期输出：清理事务表（tickets/notifications/ai_usage_logs/audit_logs 等）+ 重新 Seed 4 账号 + 演示 KB 文档。打开 `http://localhost:8081`，准备四个无痕窗口。
 
-| 角色 | 用户名 | 密码 |
-|---|---|---|
-| 市民 | `citizen_local` | `tingting-seed-demo-2026` |
-| 坐席 | `agent_local` | `tingting-seed-demo-2026` |
-| 部门人员 | `department_local` | `tingting-seed-demo-2026` |
-| 管理员 | `admin_local` | `tingting-seed-demo-2026` |
+| 角色 | 用户名 | 密码 | 部门 |
+|---|---|---|---|
+| 市民 | `citizen_local` | `tingting-seed-demo-2026` | — |
+| 坐席 | `agent_local` | `tingting-seed-demo-2026` | — |
+| 部门人员 | `department_local` | `tingting-seed-demo-2026` | 综合受理 |
+| 管理员 | `admin_local` | `tingting-seed-demo-2026` | — |
+
+### 演示策略（当前只有一个部门演示账号）
+
+系统里可有多个责任部门（城市管理、教育等），用于归口展示；**当前只开 `department_local`（综合受理）**。部门人员只能看本部门工单，这是权限隔离。
+
+| 演示目标 | 做法 |
+|---|---|
+| **五分钟主闭环** | 坐席派发一律选 **综合受理**，用 `department_local` 办理 |
+| 展示多部门数据 | 用 `agent_local` / `admin_local` 看全量列表；不要用部门账号去搜其他部门的单 |
+| 真实多部门上线后 | 再按真实部门开设账号，派发选对口部门 |
+
+口播可说：「AI 可建议归口城市管理；当前演示环境统一由综合受理窗口接单闭环；正式部署再按部门开账号。」
 
 ---
 
@@ -74,15 +86,16 @@ docker exec -w /app -e SEED_PASSWORD=tingting-seed-demo-2026 -e CONFIRM_DEMO_RES
 |---|---|
 | 登录账号 | `agent_local` |
 | 操作页面 | "工单列表" → 打开上一步创建的工单 → `TicketDetailPage` |
-| 操作 | 1) 查看 AI 自动分类建议 → 2) 点击 "受理工单" → 3) "派发部门" 选择 "城市管理" |
+| 操作 | 1) 查看 AI 自动分类建议 → 2) 点击 "受理工单" → 3) "派发部门" 选择 **"综合受理"**（与 `department_local` 同部门；派到其他部门则当前演示账号看不到） |
 
 预期结果：
 - 工单状态：`pending → accepted → assigned`。
+- 责任部门显示为 **综合受理**（`department_local` 所属部门）。
 - `ticket_status_history` 留痕：每步记录 operator_user_id、operation_type、previous/current status。
 - 顶部 "版本号" 字段从 1 递增到 3（每次状态变更 +1）。
 
 关键验证点：
-- 三态人工确认：AI 自动分类建议显示 "建议分类=路灯报修/城市管理"，坐席可 `accept` / `modify` / `reject`。
+- 三态人工确认：AI 自动分类建议显示 "建议分类=路灯报修/城市管理"，坐席可 `accept` / `modify` / `reject`（分类建议可与最终派发部门不同；演示派发请选综合受理）。
 - 若 AI 自动分类错误，坐席点 `modify` 改为正确分类（如 "教育投诉/教育服务"）后才派发，体现 advisory only。
 - 越权验证：尝试用 `citizen_local` 账号点击受理按钮，前端守卫拦截 + 后端 `AuthorizationPolicy.require_transition` 返回 403。
 

@@ -83,3 +83,14 @@ def test_ticket_list_is_paginated(client):
     assert len(result["items"]) == 2
     assert result["total"] == 3
     assert result["page"] == 1
+
+
+def test_ticket_list_keyword_matches_ticket_id(client):
+    created = client.post("/api/v1/tickets", json=payload()).json()["data"]
+    ticket_id = created["ticket_id"]
+    client.post("/api/v1/tickets", json=payload())
+    hit = client.get("/api/v1/tickets", params={"keyword": ticket_id}).json()["data"]
+    assert hit["total"] == 1
+    assert hit["items"][0]["ticket_id"] == ticket_id
+    miss = client.get("/api/v1/tickets", params={"keyword": "QT9999999999999999"}).json()["data"]
+    assert miss["total"] == 0

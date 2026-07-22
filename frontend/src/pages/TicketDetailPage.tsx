@@ -97,15 +97,19 @@ export function TicketDetailPage(){
     <PageHeader eyebrow="TICKET DETAIL" title={t.ticket_id} description={`版本 ${t.version} · 最后更新 ${dayjs(t.updated_at).format('YYYY-MM-DD HH:mm')}`} extra={<Space><Button onClick={()=>nav(-1)}>返回列表</Button><TicketStatusTag status={t.status} label={t.status_label}/></Space>}/>
     {t.collaboration_status==='awaiting_citizen'&&<Alert showIcon type="warning" message="工单正在等待市民补充材料" description={t.supplement_reason} style={{marginBottom:20}}/>}
 
-    <Card className="surface detail-card" style={{marginBottom:20}} title="办理焦点">
-      <Descriptions column={{xs:1,sm:2,md:3}} items={[
-        {key:'status',label:'当前状态',children:<TicketStatusTag status={t.status} label={t.status_label}/>},
-        {key:'department',label:'责任部门',children:t.department_name||'待派发'},
-        {key:'assignee',label:'承办坐席/人员',children:t.assignee_name||'未指定'},
-        {key:'sla',label:'SLA',children:<span>{slaMessage} · {slaDetail}</span>},
-        {key:'round',label:'当前办理轮次',children:t.handling_round>1?`第 ${t.handling_round} 轮（重新办理）`:'第 1 轮'},
-        {key:'latest',label:'最新办理结果',children:t.resolution_summary||t.public_reply||latestHistory?.content||latestHistory?.remark||'暂无结果'},
-      ]}/>
+    <Card className="surface detail-card handling-focus-card" style={{marginBottom:20}} title="办理焦点">
+      <Descriptions
+        className="handling-focus"
+        column={{xs:1,sm:2,md:3}}
+        items={[
+          {key:'status',label:'当前状态',children:<TicketStatusTag status={t.status} label={t.status_label}/>},
+          {key:'department',label:'责任部门',children:<span className="handling-focus-nowrap">{t.department_name||'待派发'}</span>},
+          {key:'assignee',label:'承办坐席/人员',children:<span className="handling-focus-nowrap">{t.assignee_name||'未指定'}</span>},
+          {key:'sla',label:'SLA',span:{xs:1,sm:2,md:2},children:<span className="handling-focus-nowrap">{slaMessage} · {slaDetail}</span>},
+          {key:'round',label:'办理轮次',span:{xs:1,sm:1,md:1},children:<span className="handling-focus-nowrap">{t.handling_round>1?`第 ${t.handling_round} 轮（重新办理）`:`第 ${t.handling_round||1} 轮`}</span>},
+          {key:'latest',label:'最新办理结果',span:{xs:1,sm:2,md:3},children:<div className="handling-focus-result">{t.resolution_summary||t.public_reply||latestHistory?.content||latestHistory?.remark||'暂无结果'}</div>},
+        ]}
+      />
       {actions.length>0&&<>
         <Divider style={{margin:'16px 0'}}/>
         <Typography.Text type="secondary" style={{display:'block',marginBottom:8}}>下一步可执行操作</Typography.Text>

@@ -16,12 +16,29 @@ from .ai_usage_recorder import (
     make_context,
     CAP_AI_ANALYZE,
     CAP_PRE_REVIEW,
+    CAP_TRIAGE_ASSISTANT,
+    CAP_HANDLING_ASSISTANT,
 )
 
 
 SENSITIVE_WORDS = ("上访", "群体性", "暴恐", "爆炸", "自杀", "伤亡", "疫情", "邪教", "未成年人")
 URGENT_WORDS = ("火灾", "燃气泄漏", "坍塌", "触电", "有人受伤", "生命危险", "立即", "紧急")
 STOP_CHARS = set("，。！？；：、,.!?;: \t\r\n")
+TRIAGE_FORBIDDEN = ("已经解决", "已经修复", "已完成维修", "已现场核查", "已派人", "已恢复正常", "已经办结")
+HANDLING_FACT_FIELDS = (
+    "resolution_summary", "resolution_measures", "resolution_outcome", "public_reply",
+)
+TRIAGE_STATUSES = frozenset({"pending", "accepted"})
+HANDLING_STATUSES = frozenset({"assigned", "processing"})
+QUALITY_DECISIONS = frozenset({"helpful", "not_helpful"})
+ADOPT_DECISIONS = frozenset({"adopted", "adopted_with_edits", "rejected"})
+DEFAULT_INTAKE_NOTICE = (
+    "您的诉求已受理，平台将根据设施权属派发至相关责任部门，具体处理进度可通过工单号查询。"
+)
+PLACEHOLDER_REPLY = (
+    "经现场核查，该设施位于【位置】，设施权属为【权属单位】。"
+    "工作人员于【处理时间】采取【处理措施】，目前【处理状态】。"
+)
 
 
 class AiService:
@@ -161,21 +178,234 @@ class AiService:
                 "time_limit_hint": "2小时内响应" if urgent else "24小时内核查" if infra_signals else "正常时限",
                 "automatic_decision": False}, 95 if urgent or sensitive else 78 if infra_signals else 62
 
-    def analyze(self, ticket_id: str, types: list[str], principal: Principal):
-        ticket = self._ticket(ticket_id, principal)
-        allowed = {"completeness", "summary", "similarity", "risk"} if principal.role == "citizen" else {
-            "assignment", "similarity", "summary", "completeness", "document_draft", "risk"
+    @staticmethod
+    def _handling_facts_sufficient(ticket) -> bool:
+        filled = [
+            bool((getattr(ticket, key, None) or "").strip())
+            for key in ("resolution_summary", "resolution_measures", "public_reply")
+        ]
+        return sum(1 for item in filled if item) >= 2
+
+    def _triage_bundle(self, ticket):
+        summary_payload, _ = self._summary(ticket)
+        completeness_payload, completeness_score = self._completeness(ticket)
+        risk_payload, _ = self._risk(ticket)
+        assignment_payload, assignment_score = self._assignment(ticket)
+        urgency_level = "urgent" if risk_payload["level"] == "urgent" else (
+            "expedited" if risk_payload["level"] == "sensitive" else "normal"
+        )
+        departments = {
+            "recommended_departments": [
+                {
+                    "department_id": row.get("department_id"),
+                    "department_name": row.get("department_name"),
+                    "recommendation_level": "high" if index == 0 else "medium",
+                    "reason": "基于分类默认责任部门与历史办结分布",
+                    "historical_cases": row.get("historical_cases"),
+                    "score": row.get("score"),
+                }
+                for index, row in enumerate(assignment_payload.get("recommended_departments") or [])
+            ]
         }
-        if not set(types) <= allowed:
-            raise PermissionDenied("当前角色不能生成所请求的 AI 建议类型")
+        notice = DEFAULT_INTAKE_NOTICE
+        payload = {
+            "capability": CAP_TRIAGE_ASSISTANT,
+            "case_summary": {
+                "description": summary_payload.get("summary"),
+                "location": summary_payload.get("location") or ticket.location,
+                "duration": ticket.occurred_at_text or "未提供",
+                "affected_scope": summary_payload.get("impact"),
+            },
+            "classification": {
+                "request_type": ticket.request_type or "待确认",
+                "category": ticket.category.name if ticket.category else "待确认",
+                "subcategory": "",
+                "reason": "基于诉求描述与现有分类配置生成，需坐席确认",
+            },
+            "urgency": {
+                "level": urgency_level,
+                "emergency": risk_payload["level"] == "urgent",
+                "reason": risk_payload.get("recommendation") or summary_payload.get("urgency_hint"),
+            },
+            "completeness": {
+                "complete": completeness_payload.get("complete"),
+                "known_fields": [f for f in ("description", "location", "occurred_at_text", "contact") if getattr(ticket, f, None)],
+                "missing_fields": completeness_payload.get("missing_fields") or [],
+                "follow_up_questions": completeness_payload.get("tips") or [],
+                "completeness_score": completeness_score,
+            },
+            "department_candidates": departments["recommended_departments"],
+            "sla_recommendation": {
+                "response_deadline": risk_payload.get("time_limit_hint") or "按分类默认受理时限",
+                "handling_deadline": "按分类默认办理时限（需人工确认）",
+                "reason": "仅作受理阶段参考，不构成对市民的办结承诺",
+            },
+            "intake_notice_draft": notice,
+            "advisory_only": True,
+            "confidence_labels": {
+                "completeness_score": completeness_score,
+                "assignment_score": assignment_score,
+            },
+        }
+        return self._sanitize_triage_payload(payload), None
+
+    def _handling_bundle(self, ticket):
+        facts_ok = self._handling_facts_sufficient(ticket)
+        missing = []
+        if not (ticket.resolution_summary or "").strip():
+            missing.append("核查结果/处理摘要")
+        if not (ticket.resolution_measures or "").strip():
+            missing.append("处理措施")
+        if not (ticket.public_reply or "").strip():
+            missing.append("对市民回复要点")
+        if not (ticket.resolution_outcome or "").strip():
+            missing.append("当前处理结果")
+        dept_name = ticket.department.name if getattr(ticket, "department", None) else "本部门"
+        checklist = [
+            "核实具体位置与门牌/杆号",
+            "确认设施权属单位",
+            "现场查看损坏程度与安全风险",
+            "记录核查时间与工作人员",
+            "留存现场照片或视频证据",
+        ]
+        plan = [
+            "按核查清单完成现场核实",
+            "明确主办与协办职责",
+            "实施处置并记录措施与时间",
+            "整理证据材料后起草回复",
+            "提交办理结果供坐席复核办结",
+        ]
+        reply_template = PLACEHOLDER_REPLY
+        reply_draft = reply_template if not facts_ok else (
+            f"您好：您反映的“{(ticket.description or '')[:80]}”事项，"
+            f"{ticket.resolution_summary or ''}。"
+            f"处理措施：{ticket.resolution_measures or ''}。"
+            f"{ticket.public_reply or ''}"
+        )
+        payload = {
+            "capability": CAP_HANDLING_ASSISTANT,
+            "case_summary": {
+                "description": (ticket.description or "")[:200],
+                "assigned_department": dept_name,
+                "classification": ticket.category.name if ticket.category else "未分类",
+                "known_facts": [
+                    item for item in [
+                        ticket.resolution_summary, ticket.resolution_measures, ticket.public_reply,
+                    ] if item
+                ],
+            },
+            "verification_checklist": checklist,
+            "handling_plan": plan,
+            "policy_references": ["按部门职责与现行公开政策规范办理；具体条文以知识库检索结果为准"],
+            "risk_warnings": [
+                "临近 SLA 截止时优先现场核查并留痕",
+                "跨权属争议需书面确认后再处置",
+            ],
+            "missing_handling_facts": missing,
+            "collaboration_suggestions": ["如权属不清，先联系综合受理窗口协调"],
+            "evidence_checklist": ["现场照片", "核查记录", "处置前后对比材料"],
+            "reply_template": reply_template,
+            "reply_draft": reply_draft,
+            "facts_sufficient": facts_ok,
+            "advisory_only": True,
+        }
+        if not facts_ok:
+            lowered = reply_draft
+            for phrase in TRIAGE_FORBIDDEN:
+                if phrase in lowered:
+                    payload["reply_draft"] = reply_template
+                    break
+        return payload, None
+
+    @staticmethod
+    def _sanitize_triage_payload(payload: dict) -> dict:
+        blob = json.dumps(payload, ensure_ascii=False)
+        for phrase in TRIAGE_FORBIDDEN:
+            if phrase in blob:
+                payload["intake_notice_draft"] = DEFAULT_INTAKE_NOTICE
+                payload["sla_recommendation"] = {
+                    **(payload.get("sla_recommendation") or {}),
+                    "reason": "已清除疑似办结承诺表述；SLA 仅供内部受理参考",
+                }
+                break
+        notice = str(payload.get("intake_notice_draft") or "")
+        for phrase in TRIAGE_FORBIDDEN:
+            notice = notice.replace(phrase, "")
+        payload["intake_notice_draft"] = notice.strip() or DEFAULT_INTAKE_NOTICE
+        payload["advisory_only"] = True
+        return payload
+
+    def _require_triage_access(self, ticket, principal: Principal):
+        if principal.role not in {"agent", "admin"}:
+            raise PermissionDenied("仅坐席或管理员可使用智能分诊")
+        if ticket.status not in TRIAGE_STATUSES:
+            raise BusinessError(
+                "INVALID_TICKET_STATE",
+                f"智能分诊仅适用于 pending/accepted，当前状态为 {ticket.status}",
+                409,
+            )
+
+    def _require_handling_access(self, ticket, principal: Principal):
+        if principal.role not in {"department_staff", "admin"}:
+            raise PermissionDenied("仅责任部门人员或管理员可使用办件助手")
+        if ticket.status not in HANDLING_STATUSES:
+            raise BusinessError(
+                "INVALID_TICKET_STATE",
+                f"办件助手仅适用于 assigned/processing，当前状态为 {ticket.status}",
+                409,
+            )
+        if principal.role == "department_staff":
+            if principal.department_id is None or ticket.assigned_department_id != principal.department_id:
+                raise PermissionDenied("只能对本部门已派发工单使用办件助手")
+
+    def analyze(self, ticket_id: str, types: list[str], principal: Principal, capability: str | None = None):
+        ticket = self._ticket(ticket_id, principal)
+        # Role capability defaults — agent triage vs department handling.
+        if capability == CAP_TRIAGE_ASSISTANT or (
+            capability is None and principal.role in {"agent", "admin"} and set(types) <= {
+                CAP_TRIAGE_ASSISTANT, "assignment", "summary", "completeness", "risk", "similarity",
+            } and CAP_TRIAGE_ASSISTANT in types
+        ):
+            self._require_triage_access(ticket, principal)
+            types = [CAP_TRIAGE_ASSISTANT]
+            usage_cap = CAP_TRIAGE_ASSISTANT
+        elif capability == CAP_HANDLING_ASSISTANT or (
+            capability is None and principal.role == "department_staff"
+        ) or CAP_HANDLING_ASSISTANT in types:
+            self._require_handling_access(ticket, principal)
+            types = [CAP_HANDLING_ASSISTANT]
+            usage_cap = CAP_HANDLING_ASSISTANT
+        elif principal.role == "citizen":
+            allowed = {"completeness", "summary", "similarity", "risk"}
+            if not set(types) <= allowed:
+                raise PermissionDenied("当前角色不能生成所请求的 AI 建议类型")
+            usage_cap = CAP_AI_ANALYZE
+        elif principal.role in {"agent", "admin"}:
+            # Legacy granular types for agent: strip document_draft; prefer triage statuses.
+            if "document_draft" in types:
+                raise PermissionDenied("坐席分诊不得生成处理文书草稿，请使用 triage_assistant")
+            if ticket.status not in TRIAGE_STATUSES and set(types) & {"assignment", "summary", "completeness", "risk"}:
+                raise BusinessError(
+                    "INVALID_TICKET_STATE",
+                    f"受理分派类建议仅适用于 pending/accepted，当前状态为 {ticket.status}",
+                    409,
+                )
+            allowed = {"assignment", "similarity", "summary", "completeness", "risk", CAP_TRIAGE_ASSISTANT}
+            if not set(types) <= allowed:
+                raise PermissionDenied("当前角色不能生成所请求的 AI 建议类型")
+            usage_cap = CAP_AI_ANALYZE if CAP_TRIAGE_ASSISTANT not in types else CAP_TRIAGE_ASSISTANT
+        else:
+            raise PermissionDenied("当前角色不能生成 AI 建议")
+
         fingerprint = self._fingerprint(ticket)
         builders = {
             "assignment": self._assignment, "similarity": self._similar,
             "summary": self._summary, "completeness": self._completeness,
             "document_draft": self._document, "risk": self._risk,
+            CAP_TRIAGE_ASSISTANT: self._triage_bundle,
+            CAP_HANDLING_ASSISTANT: self._handling_bundle,
         }
-        # Types that can be enhanced by LLM
-        llm_types = {"summary", "document_draft", "risk", "assignment"}
+        llm_types = {"summary", "document_draft", "risk", "assignment", CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}
         llm = get_llm_client()
         request_id = request_id_context.get() or uuid4().hex
         recorder = AiUsageRecorder(getattr(self.repository, "db", None))
@@ -185,7 +415,6 @@ class AiService:
             if existing:
                 result.append(self._present(existing))
                 continue
-            # Try LLM first for supported types, fall back to rules
             provider = self.settings.ai_provider
             model_name = self.settings.ai_model_name
             payload = None
@@ -196,9 +425,8 @@ class AiService:
             if suggestion_type in llm_types and llm.available:
                 context = self._llm_context(ticket, suggestion_type)
                 llm_result = llm.complete(suggestion_type, context)
-                # P0-D: record every LLM call (success or failure) with real usage
                 recorder.record_llm_call(
-                    make_context(CAP_AI_ANALYZE, route="ai_analyze",
+                    make_context(usage_cap, route=usage_cap,
                                  principal=principal, request_id=request_id),
                     llm_result, provider=llm.provider,
                     degraded=not llm_result.success,
@@ -210,35 +438,51 @@ class AiService:
                     model_name = llm_result.model
                     prompt_version = llm_result.prompt_version
                     latency_ms = llm_result.latency_ms
-                    confidence = 88
+                    confidence = 0  # model self-score is not a reliable metric
                     used_llm = True
-            # Fallback to rules — record rules-tier usage honestly (zero tokens)
+                    if suggestion_type == CAP_TRIAGE_ASSISTANT:
+                        payload = self._sanitize_triage_payload(payload)
+                    if suggestion_type == CAP_HANDLING_ASSISTANT and not self._handling_facts_sufficient(ticket):
+                        payload["facts_sufficient"] = False
+                        payload["reply_draft"] = payload.get("reply_template") or PLACEHOLDER_REPLY
+                        payload["missing_handling_facts"] = payload.get("missing_handling_facts") or [
+                            "核查结果/处理摘要", "处理措施", "对市民回复要点",
+                        ]
             if payload is None:
                 if suggestion_type in llm_types:
                     recorder.record_rules_call(
-                        make_context(CAP_AI_ANALYZE, route="ai_analyze",
+                        make_context(usage_cap, route=usage_cap,
                                      principal=principal, request_id=request_id),
                         model_name="rules",
                         degrade_reason="rules_fallback" if llm.available else "llm_unavailable",
                     )
-                payload, confidence = builders[suggestion_type](ticket)
+                built = builders[suggestion_type](ticket)
+                payload, confidence = built[0], built[1]
+                if confidence is None:
+                    confidence = 0
             risk_level = payload.get("level", "attention" if payload.get("possible_duplicate") else "none")
+            if suggestion_type in {CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}:
+                urgency = (payload.get("urgency") or {})
+                risk_level = "urgent" if urgency.get("emergency") else "attention"
             explanation = (
-                f"由 {model_name} 生成，仅供人工参考。"
+                f"由 {model_name} 生成（capability={usage_cap}），仅供人工参考，不会自动变更工单状态。"
                 if used_llm
-                else "基于当前工单、分类配置与可见历史工单生成；结果仅供人工参考。"
+                else f"基于规则与可见工单数据生成（capability={usage_cap}）；结果仅供人工参考。"
             )
             item = AiSuggestionModel(
                 id=str(uuid4()), ticket_id=ticket.ticket_id, suggestion_type=suggestion_type,
-                status="completed", risk_level=risk_level, confidence=confidence,
+                status="completed", risk_level=risk_level if isinstance(risk_level, str) else "none",
+                confidence=int(confidence or 0),
                 provider=provider, model_name=model_name,
                 input_fingerprint=fingerprint, result_json=json.dumps(payload, ensure_ascii=False),
                 explanation=explanation,
                 generated_by_user_id=principal.user_id,
+                created_at=datetime.now(timezone.utc),
             )
             result.append(self._present(self.repository.add(item)))
             self.audit.log(principal, "generate_ai_suggestion", resource_type="ai_suggestion", resource_id=item.id,
                            details={"ticket_id": ticket.ticket_id, "suggestion_type": suggestion_type,
+                                    "capability": usage_cap,
                                     "provider": provider, "model": model_name, "prompt_version": prompt_version,
                                     "latency_ms": latency_ms, "advisory_only": True})
         return result
@@ -246,8 +490,10 @@ class AiService:
     def _llm_context(self, ticket, suggestion_type: str) -> dict:
         """Build context dict for LLM prompt."""
         departments = [d.name for d in self.repository.active_departments()]
+        assigned = ticket.department.name if getattr(ticket, "department", None) else "未派发"
         return {
             "ticket_id": ticket.ticket_id,
+            "status": ticket.status or "",
             "request_type": ticket.request_type or "未指定",
             "description": ticket.description or "",
             "location": ticket.location or "未知",
@@ -259,6 +505,8 @@ class AiService:
             "resolution_measures": ticket.resolution_measures or "暂无",
             "public_reply": ticket.public_reply or "暂无",
             "departments": "、".join(departments) if departments else "无可用部门",
+            "assigned_department": assigned,
+            "facts_sufficient": "是" if self._handling_facts_sufficient(ticket) else "否",
         }
 
     def list(self, ticket_id: str, principal: Principal):
@@ -266,20 +514,55 @@ class AiService:
         items = self.repository.list_for_ticket(ticket_id)
         if principal.role == "citizen":
             items = [item for item in items if item.suggestion_type in {"completeness", "summary", "similarity", "risk"}]
+        elif principal.role == "agent":
+            items = [item for item in items if item.suggestion_type in {
+                CAP_TRIAGE_ASSISTANT, "assignment", "summary", "completeness", "risk", "similarity",
+            }]
+        elif principal.role == "department_staff":
+            items = [item for item in items if item.suggestion_type in {
+                CAP_HANDLING_ASSISTANT, "ticket_advice", "document_draft",
+            }]
         return [self._present(item) for item in items]
 
-    def review(self, suggestion_id: str, decision: str, comment: str | None, principal: Principal):
+    def review(self, suggestion_id: str, decision: str, comment: str | None, principal: Principal,
+               edited_content: dict | None = None):
         item = self.repository.get(suggestion_id)
         if not item:
             raise BusinessError("AI_SUGGESTION_NOT_FOUND", "未找到 AI 建议", 404)
-        self._ticket(item.ticket_id, principal)
+        ticket = self._ticket(item.ticket_id, principal)
+        status_before = ticket.status
+        if decision in QUALITY_DECISIONS:
+            action = "review_ai_suggestion_quality"
+        elif decision in ADOPT_DECISIONS:
+            action = "review_ai_suggestion_adoption"
+            if item.suggestion_type == CAP_TRIAGE_ASSISTANT:
+                self._require_triage_access(ticket, principal)
+            elif item.suggestion_type == CAP_HANDLING_ASSISTANT:
+                self._require_handling_access(ticket, principal)
+        else:
+            raise BusinessError("INVALID_REVIEW_DECISION", "不支持的审核决策", 422)
         item.review_decision = decision
         item.review_comment = comment
         item.reviewed_by_user_id = principal.user_id
         item.reviewed_at = datetime.now(timezone.utc)
+        if edited_content and decision == "adopted_with_edits":
+            # Snapshot edited content into comment/result metadata without mutating ticket status.
+            merged = json.loads(item.result_json)
+            merged["edited_content"] = edited_content
+            item.result_json = json.dumps(merged, ensure_ascii=False)
         item = self.repository.save(item)
-        self.audit.log(principal, "review_ai_suggestion", resource_type="ai_suggestion", resource_id=item.id,
-                       details={"decision": decision, "ticket_id": item.ticket_id})
+        self.audit.log(principal, action, resource_type="ai_suggestion", resource_id=item.id,
+                       details={
+                           "decision": decision,
+                           "ticket_id": item.ticket_id,
+                           "suggestion_type": item.suggestion_type,
+                           "ticket_status_unchanged": ticket.status,
+                           "status_before": status_before,
+                       })
+        # Re-load ticket to assert status was not mutated by AI review.
+        refreshed = self.repository.ticket(item.ticket_id)
+        if refreshed and refreshed.status != status_before:
+            raise BusinessError("AI_MUST_NOT_MUTATE_STATUS", "AI 建议审核不得变更工单状态", 500)
         return self._present(item)
 
     def hotspots(self, principal: Principal, days: int):

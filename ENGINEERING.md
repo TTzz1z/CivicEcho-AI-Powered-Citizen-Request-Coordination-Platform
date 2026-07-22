@@ -122,7 +122,7 @@ flowchart LR
   → 写入 ai_usage_logs（含 capability / provider / total_tokens / latency / cost / degrade_reason）
 ```
 
-10 种 capability（`backend/app/services/ai_usage_recorder.py`）：
+角色化 AI capability（在原 10 种基础上扩展分诊/办件）：
 
 | capability | model_tier | 用途 |
 |---|---|---|
@@ -130,12 +130,22 @@ flowchart LR
 | `ticket_draft` | llm_lite | 草稿动态字段提取 |
 | `policy_rag` | llm_full | 政策咨询答案生成 |
 | `service_guide` | llm_full | 办事指南答案生成 |
-| `ticket_advice` | llm_full | 工单办理建议（摘要、风险、责任部门） |
-| `ai_analyze` | llm_full | 综合分析 |
+| `ticket_advice` | llm_full | 工单详情侧栏办件建议（兼容） |
+| `triage_assistant` | llm_full | 坐席智能分诊与派发建议 |
+| `handling_assistant` | llm_full | 部门办件核查与文书建议 |
+| `ai_analyze` | llm_full | 综合/遗留分析类型 |
 | `pre_review` | llm_lite | 提交前预审 |
 | `embedding_index` | embedding | 知识库文档索引 |
 | `embedding_query` | embedding | RAG 查询 embedding |
 | `semantic_cache` | embedding | 语义缓存命中判定 |
+
+#### 分诊 / 办件拆分要点
+
+- Prompt 与 Schema 分离：`llm_client.PROMPTS['triage_assistant'|'handling_assistant']`；规则回退在 `AiService._triage_bundle/_handling_bundle`。
+- 权限与状态：坐席仅 `pending|accepted`；部门仅 `assigned|processing` 且 `assigned_department_id` 匹配；前端隐藏不能替代后端校验。
+- 文书事实约束：无办理事实时 `reply_draft` 只能是占位符模板。
+- 建议采纳（`adopted*`）与模型反馈（`helpful/not_helpful`）分审计动作；均不修改 `ticket.status`。
+- 管理员 AI 用量页可按 capability 区分两种角色能力。
 
 ## 降级机制说明
 

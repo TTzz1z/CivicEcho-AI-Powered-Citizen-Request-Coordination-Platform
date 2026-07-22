@@ -89,9 +89,41 @@ describe('chatStorage privacy', () => {
   it('clears previous account keys on account switch', () => {
     localStorage.setItem('tingting_chat_web-user-1', 'old')
     localStorage.setItem('tingting_chat_draft_web-user-1', 'old-draft')
+    localStorage.setItem('tingting_chat_web-user-1__abc', 'thread')
+    localStorage.setItem('tingting_chat_index_web-user-1', 'idx')
     clearChatPrivacyOnAccountSwitch(1, 2)
     expect(localStorage.getItem('tingting_chat_web-user-1')).toBeNull()
     expect(localStorage.getItem('tingting_chat_draft_web-user-1')).toBeNull()
+    expect(localStorage.getItem('tingting_chat_web-user-1__abc')).toBeNull()
+    expect(localStorage.getItem('tingting_chat_index_web-user-1')).toBeNull()
+  })
+
+  it('tracks multiple conversations and migrates legacy single-thread cache', async () => {
+    const {
+      conversationMessageKey,
+      loadChatMessages,
+      loadConversationIndex,
+      migrateLegacyChatIfNeeded,
+      saveChatMessages,
+      touchConversationFromMessages,
+      removeConversation,
+    } = await import('./chatStorage')
+    const sender = 'web-user-42'
+    const legacy = [{ id: '1', side: 'user', text: '路灯坏了' }]
+    saveChatMessages(`tingting_chat_${sender}`, legacy)
+    const sessionId = 'sess-legacy'
+    migrateLegacyChatIfNeeded(sender, sessionId)
+    expect(localStorage.getItem(`tingting_chat_${sender}`)).toBeNull()
+    expect(loadChatMessages(conversationMessageKey(sender, sessionId))).toEqual(legacy)
+    expect(loadConversationIndex(sender)[0]?.id).toBe(sessionId)
+
+    const second = 'sess-2'
+    saveChatMessages(conversationMessageKey(sender, second), [{ id: '2', side: 'user', text: '咨询政策' }])
+    touchConversationFromMessages(sender, second, [{ side: 'user', text: '咨询政策' }])
+    expect(loadConversationIndex(sender).map((c) => c.id)).toEqual([second, sessionId])
+    removeConversation(sender, second)
+    expect(loadConversationIndex(sender).map((c) => c.id)).toEqual([sessionId])
+    expect(localStorage.getItem(conversationMessageKey(sender, second))).toBeNull()
   })
 
   it('redacts id card and phone in persisted messages', async () => {

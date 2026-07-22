@@ -1,9 +1,27 @@
 import { api } from './client'
 import type { AiSuggestion, AiSuggestionType, Hotspot, IntegrationStatus } from '../types'
 
-export async function analyzeTicket(ticketId:string,suggestionTypes:AiSuggestionType[]){return (await api.post<{data:AiSuggestion[]}>(`/ai/tickets/${encodeURIComponent(ticketId)}/analyze`,{suggestion_types:suggestionTypes})).data.data}
-export async function listSuggestions(ticketId:string){return (await api.get<{data:AiSuggestion[]}>(`/ai/tickets/${encodeURIComponent(ticketId)}/suggestions`)).data.data}
-export async function reviewSuggestion(id:string,decision:'helpful'|'not_helpful'){return (await api.post<{data:AiSuggestion}>(`/ai/suggestions/${id}/review`,{decision})).data.data}
+export async function analyzeTicket(
+  ticketId: string,
+  suggestionTypes: AiSuggestionType[],
+  capability?: 'triage_assistant' | 'handling_assistant',
+) {
+  return (await api.post<{ data: AiSuggestion[] }>(`/ai/tickets/${encodeURIComponent(ticketId)}/analyze`, {
+    suggestion_types: suggestionTypes,
+    capability,
+  })).data.data
+}
+export async function listSuggestions(ticketId: string) {
+  return (await api.get<{ data: AiSuggestion[] }>(`/ai/tickets/${encodeURIComponent(ticketId)}/suggestions`)).data.data
+}
+export async function reviewSuggestion(
+  id: string,
+  decision: 'helpful' | 'not_helpful' | 'adopted' | 'adopted_with_edits' | 'rejected',
+  comment?: string,
+  edited_content?: Record<string, unknown>,
+) {
+  return (await api.post<{ data: AiSuggestion }>(`/ai/suggestions/${id}/review`, { decision, comment, edited_content })).data.data
+}
 export async function listHotspots(days=30){return (await api.get<{data:Hotspot[]}>('/ai/hotspots',{params:{days}})).data.data}
 export async function listIntegrationStatuses(){return (await api.get<{data:IntegrationStatus[]}>('/integrations/status')).data.data}
 export async function syncDirectory(){return (await api.post<{data:{created:number;updated:number;skipped:number}}>('/integrations/directory/sync')).data.data}

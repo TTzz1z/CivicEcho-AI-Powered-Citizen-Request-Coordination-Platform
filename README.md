@@ -105,10 +105,10 @@ cd frontend; npm run lint:types
 # Vite build(OK)
 cd frontend; npm run build
 
-# Playwright Smoke(6 条核心路径, Chromium; GitHub Actions 日常 CI 同此)
+# Playwright Smoke(6 条核心路径, Chromium; GitHub Actions 日常 CI / 发布门禁同此)
 cd frontend; npx playwright test e2e/smoke.spec.ts --project=chromium
 
-# Playwright 全量 E2E（workflow_dispatch / tag 门禁，约 20 min）
+# Playwright 全量 E2E（可选：workflow_dispatch 手动开启，不作为 v1 发布门禁）
 sh scripts/run-e2e.sh full
 
 # 生产等价 Compose（Caddy + ClamAV；容器内 MinIO HTTP）

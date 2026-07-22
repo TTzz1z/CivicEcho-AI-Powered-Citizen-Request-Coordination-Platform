@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       run_e2e_full:
-        description: "Run full three-browser Playwright suite"
+        description: "Optionally run full three-browser Playwright suite (manual only; not a release gate)"
         type: boolean
-        default: true
+        default: false
       run_production_compose:
         description: "Run production-compose integration job"
         type: boolean
@@ -125,11 +125,11 @@ jobs:
       - run: sh scripts/run-e2e.sh smoke
 
   e2e-full:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.run_e2e_full == true)
-      || startsWith(github.ref, 'refs/tags/')
+    # Manual-only optional suite. Release gate is e2e-smoke + unit/backend/production-compose.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_e2e_full == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

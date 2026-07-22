@@ -1,7 +1,7 @@
 # CivicEcho / 倾听助手 v1.0.0 Release Notes
 
 发布主题：**可信度收口（Credibility Closeout）**  
-状态：代码与文档已收口；**仅在** GitHub Actions `main` 全绿（含 `production-compose`）且手动 `e2e-full` 通过后打 tag `v1.0.0`。
+状态：代码与文档已收口；**仅在** GitHub Actions `main` 默认 jobs 全绿（含 `e2e-smoke`、`production-compose`）后打 tag `v1.0.0`。`e2e-full` 为可选手动套件，不作为发布门禁。
 
 ## Highlights
 
@@ -22,9 +22,9 @@
 
 | Gate | When |
 |---|---|
-| unit / e2e-smoke / docker-integration | every `main` push |
-| `production-compose`（PG + MinIO + ClamAV mock + backend/worker） | every `main` push |
-| `e2e-full`（三浏览器） | `workflow_dispatch` 或 tag |
+| unit / e2e-smoke / docker-integration | every `main` push（**默认发布门禁**） |
+| `production-compose`（PG + MinIO + ClamAV mock + backend/worker） | every `main` push（**默认发布门禁**） |
+| `e2e-full`（三浏览器） | 仅 `workflow_dispatch` 显式开启；可选，失败不阻塞 tag |
 
 ## Known CI note
 

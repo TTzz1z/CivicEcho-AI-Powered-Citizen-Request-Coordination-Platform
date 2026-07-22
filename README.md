@@ -4,6 +4,40 @@
 
 项目重点不是页面堆叠，而是把对话式入口、可信业务状态机、四角色权限、AI 可信度审计、降级机制、知识库可见性、人工复核三态确认整合到同一个工程化系统中。所有数据均为演示种子数据，不涉及真实政务数据；外部短信/OIDC/地图/政务平台均为可配置适配器，默认 disabled。
 
+## 界面预览
+
+按演示主闭环选取关键界面（市民建单 → 坐席分诊派发 → 部门办件 → 市民确认 → 运营总览）。
+
+### 市民建单
+
+智能对话识别诉求，右侧自动填充工单草稿，市民核对后提交。
+
+![市民智能对话建单](docs/images/citizen-chat-intake.png)
+
+### 坐席分诊派发
+
+AI 给出分类 / 紧急度 / 归口建议（advisory only），坐席确认后派发责任部门。
+
+![坐席 AI 分诊建议](docs/images/agent-ai-triage.png)
+
+![坐席派发部门](docs/images/agent-dispatch.png)
+
+### 部门办件
+
+部门人员使用 AI 办件助手生成办理方案与回复模板，提交办理结果并回传坐席。
+
+![部门 AI 办件与文书](docs/images/department-ai-handling.png)
+
+![部门协同任务办理结果](docs/images/department-task-result.png)
+
+### 市民确认与运营总览
+
+市民确认结果并评价；管理员在运营总览查看工单状态与诉求分布。
+
+![市民确认结果并评价](docs/images/citizen-confirm-rating.png)
+
+![管理员运营总览](docs/images/admin-ops-overview.png)
+
 ## 核心功能
 
 | 模块 | 已实现能力 |

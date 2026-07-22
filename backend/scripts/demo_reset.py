@@ -43,9 +43,27 @@ DEMO_DEPARTMENT_CODES = {
 }
 
 DEMO_CATEGORY_CODES = {
+    # L1
     "CSGL",
+    # L2
     "CSGL-GGSS",
+    "CSGL-GS",
+    "CSGL-HW",
+    "CSGL-YL",
+    # L3 公共设施
     "CSGL-GGSS-LD",
+    "CSGL-GGSS-DL",
+    "CSGL-GGSS-JG",
+    "CSGL-GGSS-GD",
+    # L3 供水排水
+    "CSGL-GS-TS",
+    "CSGL-GS-JS",
+    # L3 市容环卫
+    "CSGL-HW-LJ",
+    "CSGL-HW-ZW",
+    # L3 园林绿化
+    "CSGL-YL-LH",
+    "CSGL-YL-SM",
 }
 
 

@@ -26,7 +26,7 @@
 
 - 只保留 4 个账号：`citizen_local`、`agent_local`、`department_local`、`admin_local`
 - 只保留 7 个部门：`urban-management`、`transport`、`housing-property`、`education`、`health`、`community-civil`、`general-intake`
-- 只保留 3 个分类：`CSGL` → `CSGL-GGSS` → `CSGL-GGSS-LD`
+- 只保留演示分类白名单（城市管理市政树）：`CSGL` 及下级 `CSGL-GGSS` / `CSGL-GS` / `CSGL-HW` / `CSGL-YL` 与对应末级（含路灯、道路、水电、环卫、绿化等，见 `DEMO_CATEGORY_CODES`）
 - 清空所有事务表（tickets、work_orders、notifications、appeals、follow_ups、ai_usage、audit、outbox、integration_events)
 - 清空测试 KB 文档（`P0-KB-*`、`P0-D-*` 等）
 - 通过 `app.seed.seed()` 重新插入演示种子
@@ -34,7 +34,7 @@
 **确定性验证**：连跑两次，最终统计完全一致：
 
 ```
-departments: 7, categories: 3, users: 4, tickets: 1, kb_documents: 14, kb_chunks: 27
+departments: 7, categories: 15, users: 4, tickets: 1, kb_documents: 14, kb_chunks: 27
 ```
 
 ## 四、Playwright 自动清理

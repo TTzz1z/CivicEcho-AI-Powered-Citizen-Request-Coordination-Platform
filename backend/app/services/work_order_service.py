@@ -20,6 +20,12 @@ class WorkOrderService:
         self.users = users
         self.audit = audit
 
+    def _commit_unit(self) -> None:
+        self.repository.commit()
+
+    def _rollback_unit(self) -> None:
+        self.repository.rollback()
+
     @staticmethod
     def _present(item: WorkOrderModel) -> WorkOrderRead:
         return WorkOrderRead.model_validate(item).model_copy(update={
@@ -98,9 +104,14 @@ class WorkOrderService:
             content=f"创建{'主办' if task_type == 'primary' else '协办' if task_type == 'support' else '复核'}任务：{department.name}",
             previous_status=previous, current_status=ticket.status, remark=instructions.strip(), visibility="internal",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "create_work_order", resource_type="work_order", resource_id=item.id,
-                       details={"ticket_id": ticket.ticket_id, "task_type": task_type, "department_id": department_id})
+        try:
+            self.audit.log(principal, "create_work_order", resource_type="work_order", resource_id=item.id,
+                       details={"ticket_id": ticket.ticket_id, "task_type": task_type, "department_id": department_id},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(item.id))
 
     def assign(self, work_order_id: str, version: int, assignee_user_id: int, remark: str,
@@ -119,9 +130,14 @@ class WorkOrderService:
         item.assignee_user_id = assignee_user_id
         item.version += 1
         self.repository.record(item, principal.user_id, "assign", previous, remark)
-        self.repository.commit()
-        self.audit.log(principal, "assign_work_order", resource_type="work_order", resource_id=item.id,
-                       details={"assignee_user_id": assignee_user_id})
+        try:
+            self.audit.log(principal, "assign_work_order", resource_type="work_order", resource_id=item.id,
+                       details={"assignee_user_id": assignee_user_id},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(item.id))
 
     def start(self, work_order_id: str, version: int, remark: str, principal: Principal) -> WorkOrderRead:
@@ -146,8 +162,13 @@ class WorkOrderService:
             ticket.assigned_user_id = item.assignee_user_id
         ticket.version += 1
         self.repository.record(item, principal.user_id, "start", previous, remark)
-        self.repository.commit()
-        self.audit.log(principal, "start_work_order", resource_type="work_order", resource_id=item.id)
+        try:
+            self.audit.log(principal, "start_work_order", resource_type="work_order", resource_id=item.id,
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(item.id))
 
     def return_to_agent(self, work_order_id: str, version: int, remark: str, principal: Principal) -> WorkOrderRead:
@@ -173,9 +194,14 @@ class WorkOrderService:
             ticket.assigned_user_id = None
         self.repository.record(item, principal.user_id, "return_to_agent", previous, remark)
         ticket.version += 1
-        self.repository.commit()
-        self.audit.log(principal, "return_work_order", resource_type="work_order", resource_id=item.id,
-                       details={"reason": remark})
+        try:
+            self.audit.log(principal, "return_work_order", resource_type="work_order", resource_id=item.id,
+                       details={"reason": remark},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(item.id))
 
     def transfer(self, work_order_id: str, version: int, target_department_id: int,
@@ -213,9 +239,14 @@ class WorkOrderService:
             ticket.status = "assigned"
         ticket.collaboration_status = "in_progress"
         ticket.version += 1
-        self.repository.commit()
-        self.audit.log(principal, "transfer_work_order", resource_type="work_order", resource_id=item.id,
-                       details={"successor_id": successor.id, "target_department_id": target_department_id})
+        try:
+            self.audit.log(principal, "transfer_work_order", resource_type="work_order", resource_id=item.id,
+                       details={"successor_id": successor.id, "target_department_id": target_department_id},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(successor.id))
 
     def submit(self, work_order_id: str, version: int, remark: str, result_summary: str,
@@ -246,8 +277,13 @@ class WorkOrderService:
         if (active and all(x.status == "submitted" for x in active)
                 and ticket.collaboration_status != "awaiting_dispatch"):
             ticket.collaboration_status = "awaiting_summary"
-        self.repository.commit()
-        self.audit.log(principal, "submit_work_order_result", resource_type="work_order", resource_id=item.id)
+        try:
+            self.audit.log(principal, "submit_work_order_result", resource_type="work_order", resource_id=item.id,
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return self._present(self.repository.get(item.id))
 
     def summarize(self, ticket_id: str, payload: TicketResolve, principal: Principal):
@@ -291,9 +327,14 @@ class WorkOrderService:
             previous_status=previous, current_status=ticket.status,
             remark=payload.remark, visibility="public",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "submit_for_review", resource_type="ticket", resource_id=ticket.ticket_id,
-                       details={"work_order_count": len(orders)})
+        try:
+            self.audit.log(principal, "submit_for_review", resource_type="ticket", resource_id=ticket.ticket_id,
+                       details={"work_order_count": len(orders)},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return ticket
 
     def review_and_resolve(self, ticket_id: str, payload: TicketResolve, principal: Principal):
@@ -339,9 +380,14 @@ class WorkOrderService:
             previous_status=previous, current_status="resolved",
             remark=payload.remark, visibility="public",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "review_and_resolve", resource_type="ticket", resource_id=ticket.ticket_id,
-                       details={"work_order_count": len(orders)})
+        try:
+            self.audit.log(principal, "review_and_resolve", resource_type="ticket", resource_id=ticket.ticket_id,
+                       details={"work_order_count": len(orders)},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return ticket
 
     def return_to_department(self, ticket_id: str, version: int, remark: str,
@@ -388,9 +434,14 @@ class WorkOrderService:
             previous_status=ticket.status, current_status=ticket.status,
             remark=remark, visibility="internal",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "return_to_department", resource_type="ticket", resource_id=ticket.ticket_id,
-                       details={"previous_collaboration_status": previous_collab, "reason": return_reason})
+        try:
+            self.audit.log(principal, "return_to_department", resource_type="ticket", resource_id=ticket.ticket_id,
+                       details={"previous_collaboration_status": previous_collab, "reason": return_reason},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return ticket
 
     def open_dispute(self, ticket_id: str, version: int, reason: str, remark: str, principal: Principal):
@@ -408,9 +459,14 @@ class WorkOrderService:
             content=f"发起责任归属争议：{reason.strip()}", previous_status=ticket.status,
             current_status=ticket.status, remark=remark, visibility="internal",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "open_assignment_dispute", resource_type="ticket", resource_id=ticket.ticket_id,
-                       details={"reason": reason})
+        try:
+            self.audit.log(principal, "open_assignment_dispute", resource_type="ticket", resource_id=ticket.ticket_id,
+                       details={"reason": reason},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return ticket
 
     def resolve_dispute(self, ticket_id: str, version: int, resolution: str,
@@ -443,7 +499,12 @@ class WorkOrderService:
             content=f"管理员协调结论：{resolution.strip()}", previous_status=ticket.status,
             current_status=ticket.status, remark=remark, visibility="internal",
         ))
-        self.repository.commit()
-        self.audit.log(principal, "resolve_assignment_dispute", resource_type="ticket", resource_id=ticket.ticket_id,
-                       details={"primary_work_order_id": primary_work_order_id, "resolution": resolution})
+        try:
+            self.audit.log(principal, "resolve_assignment_dispute", resource_type="ticket", resource_id=ticket.ticket_id,
+                       details={"primary_work_order_id": primary_work_order_id, "resolution": resolution},
+                       commit=False)
+            self._commit_unit()
+        except Exception:
+            self._rollback_unit()
+            raise
         return ticket

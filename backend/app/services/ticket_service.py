@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
@@ -11,6 +12,9 @@ from ..models import WorkOrderModel
 from ..schemas import STATUS_LABELS, TicketCreate, TicketDetail, TicketList, TicketQuery, TicketRead, TicketStatusHistoryRead, WorkOrderRead
 from ..security import anonymous_creator_key
 from ..time_normalization import normalize_chinese_time
+
+
+logger = logging.getLogger(__name__)
 
 
 TRANSITIONS = {
@@ -54,6 +58,29 @@ class TicketService:
         """Shared SQLAlchemy session when using Postgres-backed repositories."""
         return getattr(self.repository, "db", None) or getattr(self.work_orders, "db", None)
 
+    def _commit(self) -> None:
+        db = self._db()
+        if db is not None:
+            db.commit()
+        elif self.work_orders:
+            self.work_orders.commit()
+
+    def _rollback(self) -> None:
+        db = self._db()
+        if db is not None:
+            db.rollback()
+        elif self.work_orders:
+            self.work_orders.rollback()
+
+    def _notify(self, event: str, ticket, principal=None, detail: str = "") -> None:
+        """Best-effort notifications: never roll back a committed business transaction."""
+        if not self.aftercare:
+            return
+        try:
+            self.aftercare.on_ticket_event(event, ticket, principal, detail)
+        except Exception:
+            logger.exception("aftercare notification failed for %s on %s", event, getattr(ticket, "ticket_id", None))
+
     def create(self, data: TicketCreate, principal: Principal | None = None) -> CreateResult:
         principal = principal or self._default_principal()
         if principal.kind == "user" and principal.role not in {"citizen", "agent", "admin"}:
@@ -76,11 +103,15 @@ class TicketService:
         ticket_id = f"QT{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d')}{sequence:08d}"
         creator_id = principal.user_id if principal.kind == "user" else None
         anon_key = anonymous_creator_key(data.creator_reference) if principal.kind == "service" else None
-        result = self.repository.create(ticket_id, data, creator_id, anon_key)
-        if not result.replayed:
-            self._audit(principal, "create_ticket", ticket_id=result.ticket.ticket_id)
-            if self.aftercare:
-                self.aftercare.on_ticket_event("ticket_created", result.ticket, principal)
+        try:
+            result = self.repository.create(ticket_id, data, creator_id, anon_key, commit=False)
+            if not result.replayed:
+                self._audit(principal, "create_ticket", ticket_id=result.ticket.ticket_id, commit=False)
+                self._commit()
+                self._notify("ticket_created", result.ticket, principal)
+        except Exception:
+            self._rollback()
+            raise
         return result
 
     def get(self, ticket_id: str):
@@ -226,22 +257,32 @@ class TicketService:
         elif action == "process" and ticket.status == "resolved":
             values["resolved_at"] = None
         previous_status = ticket.status
-        updated = self.repository.transition(
-            ticket.ticket_id, version, new_status, action, history_content or remark,
-            principal.user_id, values, visibility, commit=commit,
-        )
-        if not updated:
-            raise VersionConflict()
-        audit_action = {"accept": "accept_ticket", "assign": "assign_ticket", "reject": "reject_ticket", "note": "add_ticket_note"}.get(action, "change_ticket_status")
-        self._audit(
-            principal, audit_action, ticket_id=ticket.ticket_id,
-            details={"from": previous_status, "to": new_status},
-            commit=commit,
-        )
+        try:
+            updated = self.repository.transition(
+                ticket.ticket_id, version, new_status, action, history_content or remark,
+                principal.user_id, values, visibility, commit=False,
+            )
+            if not updated:
+                raise VersionConflict()
+            audit_action = {
+                "accept": "accept_ticket", "assign": "assign_ticket",
+                "reject": "reject_ticket", "note": "add_ticket_note",
+            }.get(action, "change_ticket_status")
+            self._audit(
+                principal, audit_action, ticket_id=ticket.ticket_id,
+                details={"from": previous_status, "to": new_status},
+                commit=False,
+            )
+            if commit:
+                self._commit()
+        except Exception:
+            if commit:
+                self._rollback()
+            raise
         if run_aftercare and self.aftercare:
             event = {"accept": "ticket_accepted", "assign": "ticket_assigned", "resolve": "resolved", "close": "closed"}.get(action)
             if event:
-                self.aftercare.on_ticket_event(event, updated, principal)
+                self._notify(event, updated, principal)
         return self._present(updated, principal)
 
     def accept(self, ticket_id, version, remark, principal, category_id=None, priority="normal"):
@@ -267,9 +308,21 @@ class TicketService:
             "accept_due_at": ticket.created_at + timedelta(minutes=max(1, round(accept_minutes * factor))),
             "resolve_due_at": now + timedelta(minutes=max(1, round(resolve_minutes * factor))),
         }
-        result = self._transition(ticket_id, "accept", version, remark, principal, updates)
-        self._audit(principal, "confirm_ticket_triage", ticket_id=ticket_id,
-                    details={"category_id": category_id, "priority": priority})
+        try:
+            result = self._transition(
+                ticket_id, "accept", version, remark, principal, updates,
+                commit=False, run_aftercare=False,
+            )
+            self._audit(
+                principal, "confirm_ticket_triage", ticket_id=ticket_id,
+                details={"category_id": category_id, "priority": priority},
+                commit=False,
+            )
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
+        self._notify("ticket_accepted", self.get(ticket_id), principal)
         return result
 
     def reject(self, ticket_id, version, remark, reason_code, rejection_detail,
@@ -293,7 +346,6 @@ class TicketService:
             user = self.users.get(assigned_user_id) if self.users else None
             if not user or not user.is_active or user.role != "department_staff" or user.department_id != department_id:
                 raise BusinessError("INVALID_ASSIGNEE", "承办人必须是该部门的启用部门人员", 409)
-        db = self._db()
         try:
             result = self._transition(
                 ticket_id, "assign", version, remark, principal, {
@@ -313,18 +365,11 @@ class TicketService:
                     assignee_user_id=assigned_user_id, instructions=remark, created_by_user_id=principal.user_id,
                 )
                 self.work_orders.add(item, principal.user_id, "create", remark)
-            if db is not None:
-                db.commit()
-            elif self.work_orders:
-                self.work_orders.commit()
+            self._commit()
         except Exception:
-            if db is not None:
-                db.rollback()
-            elif self.work_orders:
-                self.work_orders.rollback()
+            self._rollback()
             raise
-        if self.aftercare:
-            self.aftercare.on_ticket_event("ticket_assigned", self.get(ticket_id), principal)
+        self._notify("ticket_assigned", self.get(ticket_id), principal)
         return result
 
     def process(self, ticket_id, version, remark, principal):
@@ -334,7 +379,6 @@ class TicketService:
             if ticket.assigned_user_id not in {None, principal.user_id}:
                 raise PermissionDenied("该工单已分派给其他承办人")
             updates = {"assigned_user_id": principal.user_id}
-        db = self._db()
         try:
             result = self._transition(
                 ticket_id, "process", version, remark, principal, updates,
@@ -352,15 +396,9 @@ class TicketService:
                     )
                     primary.version += 1
                     self.work_orders.record(primary, principal.user_id, "start", previous, remark)
-            if db is not None:
-                db.commit()
-            elif self.work_orders:
-                self.work_orders.commit()
+            self._commit()
         except Exception:
-            if db is not None:
-                db.rollback()
-            elif self.work_orders:
-                self.work_orders.rollback()
+            self._rollback()
             raise
         return result
 
@@ -378,30 +416,35 @@ class TicketService:
                     "多部门任务必须分别提交结果后，由主办部门通过汇总接口形成最终答复",
                     409,
                 )
-        result = self._transition(ticket_id, "resolve", version, remark, principal, {
-            "resolution_summary": resolution_summary,
-            "resolution_measures": resolution_measures,
-            "resolution_outcome": resolution_outcome,
-            "public_reply": public_reply,
-            "internal_note": internal_note,
-            "collaboration_status": "completed",
-        }, history_content=public_reply, visibility="public")
-        if self.work_orders:
-            primary = next((item for item in self.work_orders.list_for_ticket(ticket_id)
-                            if item.task_type == "primary" and item.status in {"pending", "processing"}), None)
-            if primary:
-                previous = primary.status
-                primary.status = "submitted"
-                primary.result_summary = resolution_summary
-                primary.result_measures = resolution_measures
-                primary.result_outcome = resolution_outcome
-                primary.public_content = public_reply
-                primary.internal_note = internal_note
-                primary.submitted_at = datetime.now(timezone.utc)
-                primary.completed_at = primary.submitted_at
-                primary.version += 1
-                self.work_orders.record(primary, principal.user_id, "submit_result", previous, remark)
-                self.work_orders.commit()
+        try:
+            result = self._transition(ticket_id, "resolve", version, remark, principal, {
+                "resolution_summary": resolution_summary,
+                "resolution_measures": resolution_measures,
+                "resolution_outcome": resolution_outcome,
+                "public_reply": public_reply,
+                "internal_note": internal_note,
+                "collaboration_status": "completed",
+            }, history_content=public_reply, visibility="public", commit=False, run_aftercare=False)
+            if self.work_orders:
+                primary = next((item for item in self.work_orders.list_for_ticket(ticket_id)
+                                if item.task_type == "primary" and item.status in {"pending", "processing"}), None)
+                if primary:
+                    previous = primary.status
+                    primary.status = "submitted"
+                    primary.result_summary = resolution_summary
+                    primary.result_measures = resolution_measures
+                    primary.result_outcome = resolution_outcome
+                    primary.public_content = public_reply
+                    primary.internal_note = internal_note
+                    primary.submitted_at = datetime.now(timezone.utc)
+                    primary.completed_at = primary.submitted_at
+                    primary.version += 1
+                    self.work_orders.record(primary, principal.user_id, "submit_result", previous, remark)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
+        self._notify("resolved", self.get(ticket_id), principal)
         return result
 
     def request_supplement(self, ticket_id, version, remark, supplement_reason, principal):
@@ -412,19 +455,23 @@ class TicketService:
             raise VersionConflict()
         if ticket.status not in {"pending", "accepted"}:
             raise BusinessError("SUPPLEMENT_NOT_ALLOWED", "当前状态不能要求补充材料", 409)
-        updated = self.repository.transition(
-            ticket.ticket_id, version, ticket.status, "request_supplement",
-            f"请补充材料：{supplement_reason.strip()}", principal.user_id,
-            {"needs_supplement": True, "collaboration_status": "awaiting_citizen",
-             "supplement_reason": supplement_reason.strip(), "supplement_requested_at": datetime.now(timezone.utc)},
-            "public",
-        )
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "request_ticket_supplement", ticket_id=ticket.ticket_id,
-                    details={"reason": supplement_reason})
-        if self.aftercare:
-            self.aftercare.on_ticket_event("supplement_required", updated, principal, supplement_reason.strip())
+        try:
+            updated = self.repository.transition(
+                ticket.ticket_id, version, ticket.status, "request_supplement",
+                f"请补充材料：{supplement_reason.strip()}", principal.user_id,
+                {"needs_supplement": True, "collaboration_status": "awaiting_citizen",
+                 "supplement_reason": supplement_reason.strip(), "supplement_requested_at": datetime.now(timezone.utc)},
+                "public", commit=False,
+            )
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "request_ticket_supplement", ticket_id=ticket.ticket_id,
+                        details={"reason": supplement_reason}, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
+        self._notify("supplement_required", updated, principal, supplement_reason.strip())
         return self._present(updated, principal)
 
     def submit_supplement(self, ticket_id, version, remark, supplement_content, principal):
@@ -435,15 +482,20 @@ class TicketService:
             raise VersionConflict()
         if ticket.collaboration_status != "awaiting_citizen":
             raise BusinessError("SUPPLEMENT_NOT_REQUESTED", "当前工单没有待补充材料", 409)
-        updated = self.repository.transition(
-            ticket.ticket_id, version, ticket.status, "submit_supplement",
-            f"市民已补充：{supplement_content.strip()}", principal.user_id,
-            {"needs_supplement": False, "collaboration_status": "none",
-             "supplemented_at": datetime.now(timezone.utc)}, "public",
-        )
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "submit_ticket_supplement", ticket_id=ticket.ticket_id)
+        try:
+            updated = self.repository.transition(
+                ticket.ticket_id, version, ticket.status, "submit_supplement",
+                f"市民已补充：{supplement_content.strip()}", principal.user_id,
+                {"needs_supplement": False, "collaboration_status": "none",
+                 "supplemented_at": datetime.now(timezone.utc)}, "public", commit=False,
+            )
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "submit_ticket_supplement", ticket_id=ticket.ticket_id, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
         return self._present(updated, principal)
 
     def close(self, ticket_id, version, remark, override_reason, principal):
@@ -491,17 +543,22 @@ class TicketService:
                 "closed_at": now,
                 "closure_type": "citizen_confirmed",
             }
-        updated = self.repository.feedback_transition(
-            ticket.ticket_id, version, new_status, content, principal.user_id,
-            updates, rating, comment, result,
-        )
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "submit_ticket_feedback", ticket_id=ticket.ticket_id, details={
-            "rating": rating, "result": result,
-        })
-        if self.aftercare and new_status == "closed":
-            self.aftercare.on_ticket_event("closed", updated, principal)
+        try:
+            updated = self.repository.feedback_transition(
+                ticket.ticket_id, version, new_status, content, principal.user_id,
+                updates, rating, comment, result, commit=False,
+            )
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "submit_ticket_feedback", ticket_id=ticket.ticket_id, details={
+                "rating": rating, "result": result,
+            }, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
+        if new_status == "closed":
+            self._notify("closed", updated, principal)
         return self._present(updated, principal)
 
     def update_contact(self, ticket_id, version, remark, contact, principal):
@@ -512,13 +569,18 @@ class TicketService:
             raise PermissionDenied("无权修改该工单联系方式")
         if ticket.version != version:
             raise VersionConflict()
-        updated = self.repository.transition(
-            ticket.ticket_id, version, ticket.status, "update_contact", remark,
-            principal.user_id, {"contact": contact},
-        )
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "update_ticket_contact", ticket_id=ticket.ticket_id)
+        try:
+            updated = self.repository.transition(
+                ticket.ticket_id, version, ticket.status, "update_contact", remark,
+                principal.user_id, {"contact": contact}, commit=False,
+            )
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "update_ticket_contact", ticket_id=ticket.ticket_id, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
         return self._present(updated, principal)
 
     def pause_sla(self, ticket_id, version, remark, reason, principal):
@@ -534,11 +596,17 @@ class TicketService:
         if not reason or len(reason.strip()) < 2:
             raise BusinessError("SLA_PAUSE_REASON_REQUIRED", "暂停计时必须填写原因", 422)
         now = datetime.now(timezone.utc)
-        updated = self.repository.transition(ticket_id, version, ticket.status, "pause_sla", remark,
-                                             principal.user_id, {"sla_paused_at": now, "sla_pause_reason": reason.strip()})
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "pause_ticket_sla", ticket_id=ticket_id, details={"reason": reason.strip()})
+        try:
+            updated = self.repository.transition(ticket_id, version, ticket.status, "pause_sla", remark,
+                                                 principal.user_id, {"sla_paused_at": now, "sla_pause_reason": reason.strip()},
+                                                 commit=False)
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "pause_ticket_sla", ticket_id=ticket_id, details={"reason": reason.strip()}, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
         return self._present(updated, principal)
 
     def resume_sla(self, ticket_id, version, remark, principal):
@@ -552,16 +620,21 @@ class TicketService:
         now = datetime.now(timezone.utc)
         seconds = max(0, int((now - ticket.sla_paused_at).total_seconds()))
         delta = timedelta(seconds=seconds)
-        updated = self.repository.transition(ticket_id, version, ticket.status, "resume_sla", remark,
-            principal.user_id, {
-                "sla_paused_at": None, "sla_pause_reason": None,
-                "total_paused_seconds": ticket.total_paused_seconds + seconds,
-                "accept_due_at": ticket.accept_due_at + delta if ticket.accept_due_at else None,
-                "resolve_due_at": ticket.resolve_due_at + delta if ticket.resolve_due_at else None,
-            })
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "resume_ticket_sla", ticket_id=ticket_id, details={"paused_seconds": seconds})
+        try:
+            updated = self.repository.transition(ticket_id, version, ticket.status, "resume_sla", remark,
+                principal.user_id, {
+                    "sla_paused_at": None, "sla_pause_reason": None,
+                    "total_paused_seconds": ticket.total_paused_seconds + seconds,
+                    "accept_due_at": ticket.accept_due_at + delta if ticket.accept_due_at else None,
+                    "resolve_due_at": ticket.resolve_due_at + delta if ticket.resolve_due_at else None,
+                }, commit=False)
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "resume_ticket_sla", ticket_id=ticket_id, details={"paused_seconds": seconds}, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
         return self._present(updated, principal)
 
     def remind(self, ticket_id, version, remark, principal):
@@ -577,12 +650,18 @@ class TicketService:
             raise PermissionDenied("当前角色不能催办")
         if ticket.version != version:
             raise VersionConflict()
-        updated = self.repository.transition(ticket_id, version, ticket.status, "remind", remark,
-                                             principal.user_id, {"reminder_count": ticket.reminder_count + 1}, "public")
-        if not updated:
-            raise VersionConflict()
-        self._audit(principal, "remind_ticket", ticket_id=ticket_id,
-                    details={"count": updated.reminder_count})
+        try:
+            updated = self.repository.transition(ticket_id, version, ticket.status, "remind", remark,
+                                                 principal.user_id, {"reminder_count": ticket.reminder_count + 1}, "public",
+                                                 commit=False)
+            if not updated:
+                raise VersionConflict()
+            self._audit(principal, "remind_ticket", ticket_id=ticket_id,
+                        details={"count": updated.reminder_count}, commit=False)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
         return self._present(updated, principal)
 
     def update_status(self, ticket_id: str, status: str, remark: Optional[str], version: int | None = None, principal: Principal | None = None):

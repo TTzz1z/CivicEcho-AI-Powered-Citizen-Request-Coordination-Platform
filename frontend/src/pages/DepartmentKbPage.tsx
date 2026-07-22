@@ -61,9 +61,9 @@ export function DepartmentKbPage() {
     <>
       <PageHeader
         eyebrow="DEPARTMENT KB"
-        title="政策知识库管理"
+        title={isAdmin ? '部门文档维护' : '政策知识库管理'}
         description={isAdmin
-          ? '管理员可管理所有部门的文档、审核发布、重建索引、处理反馈与无答案问题。'
+          ? '维护各部门知识文档：上传、编辑、提交审核、重建索引与反馈处理（治理审核请走「知识库治理审核」）。'
           : '部门人员可上传和管理本部门文档、提交审核，并查询本部门政策库反馈。'}
       />
       <Tabs

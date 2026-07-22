@@ -258,7 +258,7 @@ function StaffAiWorkbench() {
         icon={<SafetyCertificateOutlined />}
         type="warning"
         message="人机协同边界"
-        description="AI 只提供建议。受理、派发、填写办理事实、提交处理结果、复核办结必须由有权限人员在工单详情中完成。模型质量反馈（有帮助/无帮助）不会写入业务字段。"
+        description="AI 只提供建议。采纳记录不会自动派发、填写办理结果或办结；真实业务操作必须在工单详情完成。模型质量反馈（有帮助/无帮助）不会写入业务字段。"
         style={{ marginBottom: 20 }}
       />
       <Card className="surface" title={isDept ? '按已派发工单生成办件建议' : '按待受理/已受理工单生成分诊建议'} extra={<BulbOutlined />}>
@@ -318,21 +318,29 @@ function StaffAiWorkbench() {
             >
               <ResultBody item={item} />
               <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{item.explanation}</Typography.Text>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+                message="AI 只提供建议；采纳仅记审核决策，不会自动派发、填写办理结果或办结。真实业务操作请前往工单详情完成。"
+              />
               <div style={{ marginTop: 14 }}>
                 <Space wrap>
                   {(item.suggestion_type === 'triage_assistant' || item.suggestion_type === 'handling_assistant') && (
                     <>
                       <Button size="small" type="primary" onClick={() => void adoptReview(item, 'adopted')}>
-                        {isDept ? '插入办理草稿记录' : '采纳分派建议'}
+                        {isDept ? '记录采纳意见' : '记录为已采纳'}
                       </Button>
-                      <Button size="small" onClick={() => void adoptReview(item, 'adopted_with_edits')}>
-                        {isDept ? '修改后采用' : '修改后采纳'}
-                      </Button>
+                      <Tooltip title="仅记录审核决策，不会自动修改工单字段、派发或办结">
+                        <Button size="small" onClick={() => void adoptReview(item, 'adopted_with_edits')}>
+                          记录修改后采纳
+                        </Button>
+                      </Tooltip>
                       <Button size="small" danger onClick={() => void adoptReview(item, 'rejected')}>
                         {isDept ? '放弃本次建议' : '拒绝建议'}
                       </Button>
                       <Link to={`${ticketBase}/${item.ticket_id}`}>
-                        <Button size="small">同步建议到工单详情</Button>
+                        <Button size="small">前往工单详情继续办理</Button>
                       </Link>
                     </>
                   )}

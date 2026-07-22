@@ -18,7 +18,7 @@ class PostgreSQLTicketRepository(TicketRepository):
     def next_sequence(self) -> int:
         return int(self.db.execute(text("SELECT nextval('ticket_number_seq')")).scalar_one())
 
-    def create(self, ticket_id, data, creator_user_id=None, anonymous_key=None) -> CreateResult:
+    def create(self, ticket_id, data, creator_user_id=None, anonymous_key=None, *, commit: bool = True) -> CreateResult:
         existing = self.db.scalar(select(TicketModel).where(TicketModel.idempotency_key == data.idempotency_key))
         if existing:
             return CreateResult(existing, True)
@@ -37,7 +37,10 @@ class PostgreSQLTicketRepository(TicketRepository):
         ))
         self.db.add(ticket)
         try:
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
             self.db.refresh(ticket)
             return CreateResult(ticket, False)
         except IntegrityError:
@@ -137,7 +140,7 @@ class PostgreSQLTicketRepository(TicketRepository):
         return self.get(ticket_id)
 
     def feedback_transition(self, ticket_id, expected_version, status, content, operator_user_id,
-                            updates, rating, comment, result):
+                            updates, rating, comment, result, *, commit: bool = True):
         ticket = self.get(ticket_id)
         if not ticket:
             return None
@@ -162,7 +165,10 @@ class PostgreSQLTicketRepository(TicketRepository):
             resolution_version=expected_version, rating=rating, comment=comment, result=result,
         ))
         try:
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         except IntegrityError:
             self.db.rollback()
             return None

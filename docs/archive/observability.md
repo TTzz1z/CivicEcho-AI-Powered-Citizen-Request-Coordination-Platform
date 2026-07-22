@@ -1,5 +1,7 @@
 # 日志与可观测性
 
+> **【已收敛】** 现行可观测性说明已并入 **[DEPLOYMENT.md](../DEPLOYMENT.md)**。补充：`GET /metrics` 需 `MONITORING_TOKEN` 或 admin JWT；无业务 SSE。
+
 ## request_id 链路
 
 浏览器 Axios 为 Backend 与 Rasa 请求生成随机 request_id。Nginx 透传 `X-Request-ID`；Backend 校验格式、写入 ContextVar、JSON 系统日志、错误日志和独立审计表，并在响应头返回。Rasa 3.x 内置 REST channel 不提取 metadata，因此本项目的 `RequestIdRest` channel 从请求头/JSON 提取同一 ID；Action Server 将其透传至 Backend，并记录调用路径、结果、HTTP 状态和耗时。

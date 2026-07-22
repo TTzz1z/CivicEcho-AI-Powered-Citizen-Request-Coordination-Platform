@@ -21,7 +21,10 @@ class PageResult:
 
 class TicketRepository(ABC):
     @abstractmethod
-    def create(self, ticket_id: str, data: TicketCreate, creator_user_id: int | None, anonymous_key: str | None) -> CreateResult: ...
+    def create(
+        self, ticket_id: str, data: TicketCreate, creator_user_id: int | None, anonymous_key: str | None,
+        *, commit: bool = True,
+    ) -> CreateResult: ...
 
     @abstractmethod
     def next_sequence(self) -> int: ...
@@ -43,7 +46,7 @@ class TicketRepository(ABC):
     def feedback_transition(
         self, ticket_id: str, expected_version: int, status: str, content: str,
         operator_user_id: int, updates: dict, rating: str, comment: str | None,
-        result: str,
+        result: str, *, commit: bool = True,
     ) -> Optional[TicketModel]: ...
 
     @abstractmethod

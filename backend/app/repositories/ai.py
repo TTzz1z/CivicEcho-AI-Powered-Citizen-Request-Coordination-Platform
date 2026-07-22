@@ -42,9 +42,12 @@ class AiRepository:
             AiSuggestionModel.input_fingerprint == fingerprint,
         ))
 
-    def add(self, suggestion: AiSuggestionModel) -> AiSuggestionModel:
+    def add(self, suggestion: AiSuggestionModel, *, commit: bool = True) -> AiSuggestionModel:
         self.db.add(suggestion)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(suggestion)
         return suggestion
 
@@ -57,8 +60,11 @@ class AiRepository:
     def get(self, suggestion_id: str) -> AiSuggestionModel | None:
         return self.db.get(AiSuggestionModel, suggestion_id)
 
-    def save(self, suggestion: AiSuggestionModel) -> AiSuggestionModel:
-        self.db.commit()
+    def save(self, suggestion: AiSuggestionModel, *, commit: bool = True) -> AiSuggestionModel:
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(suggestion)
         return suggestion
 

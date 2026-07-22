@@ -18,6 +18,7 @@ import { AttachmentPanel } from '../components/AttachmentPanel'
 import { WorkOrderPanel } from '../components/WorkOrderPanel'
 import { AiCaseAssistant } from '../components/AiCaseAssistant'
 import type { FeedbackRating, Priority } from '../types'
+import { closureTypeLabel } from '../utils/closureType'
 
 type Action = 'accept'|'reject'|'assign'|'process'|'note'|'close'|'contact'|'feedback'|'pause_sla'|'resume_sla'|'remind'|'request_supplement'|'submit_supplement'
 type ActionFormValues = {
@@ -176,7 +177,7 @@ export function TicketDetailPage(){
       {key:'assignee',label:'承办人',children:t.assignee_name||'未指定'},{key:'created',label:'创建时间',children:dayjs(t.created_at).format('YYYY-MM-DD HH:mm')},
       {key:'accepted',label:'受理时间',children:t.accepted_at?dayjs(t.accepted_at).format('YYYY-MM-DD HH:mm'):'—'},
       {key:'resolved',label:'解决时间',children:t.resolved_at?dayjs(t.resolved_at).format('YYYY-MM-DD HH:mm'):'—'},
-      {key:'closed',label:'办结方式',children:t.closure_type==='citizen_confirmed'?'市民确认':t.closure_type==='admin_override'?'管理员代办结':'—'},
+      {key:'closed',label:'办结方式',children:closureTypeLabel(t.closure_type)},
       {key:'round',label:'处理轮次',children:t.handling_round>1?`第 ${t.handling_round} 轮（重新办理）`:'第 1 轮'},
     ]}/></Card></aside></div>
     <Modal title={active?actionLabel(active):''} open={!!active} onCancel={()=>setActive(null)} onOk={()=>form.submit()} confirmLoading={mutation.isPending} okText="确认提交" cancelText="取消" destroyOnHidden>

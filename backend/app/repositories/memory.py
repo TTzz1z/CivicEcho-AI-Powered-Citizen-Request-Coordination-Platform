@@ -21,7 +21,8 @@ class InMemoryTicketRepository(TicketRepository):
             self._sequence += 1
             return self._sequence
 
-    def create(self, ticket_id, data, creator_user_id=None, anonymous_key=None) -> CreateResult:
+    def create(self, ticket_id, data, creator_user_id=None, anonymous_key=None, *, commit: bool = True) -> CreateResult:
+        del commit  # in-memory repo has no transactional boundary
         with self._lock:
             existing_id = self._idempotency.get(data.idempotency_key)
             if existing_id:
@@ -73,7 +74,11 @@ class InMemoryTicketRepository(TicketRepository):
             items = [x for x in items if x.priority == query.priority]
         if query.keyword:
             word = query.keyword.lower()
-            items = [x for x in items if word in f"{x.description} {x.location} {x.event or ''}".lower()]
+            # Align with postgres: ticket numbers (QT…) match ticket_id; free text hits description/location/event.
+            items = [
+                x for x in items
+                if word in f"{x.ticket_id} {x.description} {x.location} {x.event or ''}".lower()
+            ]
         if query.mine:
             items = [x for x in items if x.creator_user_id == principal.user_id]
         if query.my_department:
@@ -106,7 +111,8 @@ class InMemoryTicketRepository(TicketRepository):
             return ticket
 
     def feedback_transition(self, ticket_id, expected_version, status, content, operator_user_id,
-                            updates, rating, comment, result):
+                            updates, rating, comment, result, *, commit: bool = True):
+        del commit  # in-memory repo has no transactional boundary
         with self._lock:
             ticket = self.get(ticket_id)
             if not ticket or ticket.version != expected_version:

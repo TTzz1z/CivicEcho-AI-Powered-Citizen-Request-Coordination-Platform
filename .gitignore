@@ -42,10 +42,13 @@ backend/.venv/
 frontend/node_modules/
 frontend/dist/
 frontend/build/
+frontend/coverage/
+coverage/
 *.tsbuildinfo
 
 # ----- Playwright / E2E artifacts -----
 frontend/playwright-report/
+playwright-report/
 frontend/test-results/
 frontend/test-results-*/
 test-results/

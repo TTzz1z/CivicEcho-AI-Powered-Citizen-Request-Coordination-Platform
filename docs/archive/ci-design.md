@@ -1,5 +1,7 @@
 # CI 设计
 
+> 现行测试门禁说明亦见 **[TESTING.md](../TESTING.md)**。核对点 Commit `438047c` · Alembic head `0025`。
+
 唯一有效工作流是 `.github/workflows/ci.yml`。
 
 | Job | 触发 | 内容 |

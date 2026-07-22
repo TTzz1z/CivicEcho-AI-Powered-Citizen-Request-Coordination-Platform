@@ -1,5 +1,7 @@
 # 测试数据库隔离策略
 
+> 现行测试命令与门禁见 **[TESTING.md](../TESTING.md)**。说明：`scripts/run-e2e.sh` 使用独立 Compose 项目 `tingting-e2e` 与独立库名，不碰开发 volume；下文「单库 + demo_reset」描述的是本地演示库清理策略。
+
 **背景**：倾听助手在 R4 之前曾因 pytest / Playwright 直接向演示数据库写入测试数据，导致演示环境被严重污染（57+ 测试工单、32+ 测试账号、20+ 测试部门）。R4 通过白名单 demo_reset 实现了"可确定清理",R5 在此之上补充隔离策略。
 
 ## 一、当前方案

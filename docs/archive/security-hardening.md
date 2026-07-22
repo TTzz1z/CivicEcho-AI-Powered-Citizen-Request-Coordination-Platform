@@ -1,5 +1,7 @@
 # 安全加固
 
+> **【已收敛】** 现行安全边界请以 **[DEPLOYMENT.md](../DEPLOYMENT.md)** 与 `ENGINEERING.md` 为准。本文保留；文中扫描数字未在本轮重跑 → 以 Actions `dependency-security` 为准或标未验证。
+
 ## 已实施
 
 - FastAPI CORS 精确白名单；生产环境拒绝空白名单和 `*`。

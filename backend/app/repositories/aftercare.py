@@ -11,13 +11,16 @@ class NotificationRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def add_missing(self, items: list[NotificationModel]) -> None:
+    def add_missing(self, items: list[NotificationModel], *, commit: bool = True) -> None:
         if not items:
             return
         keys = [item.event_key for item in items]
         existing = set(self.db.scalars(select(NotificationModel.event_key).where(NotificationModel.event_key.in_(keys))).all())
         self.db.add_all([item for item in items if item.event_key not in existing])
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 
     def list_for_user(self, user_id: int, page: int, page_size: int, unread_only: bool):
         statement = select(NotificationModel).where(NotificationModel.recipient_user_id == user_id)
@@ -148,3 +151,6 @@ class AftercareRepository:
 
     def commit(self) -> None:
         self.db.commit()
+
+    def rollback(self) -> None:
+        self.db.rollback()

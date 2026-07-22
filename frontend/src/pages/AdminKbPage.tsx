@@ -42,7 +42,7 @@ export function AdminKbPage() {
     <>
       <PageHeader
         eyebrow="ADMIN AI KB"
-        title="AI 知识库管理"
+        title="知识库治理审核"
         description="管理员可审核发布文档、运行 RAG 测试台、管理评测集、处理无答案问题与查询反馈。"
       />
       <Tabs

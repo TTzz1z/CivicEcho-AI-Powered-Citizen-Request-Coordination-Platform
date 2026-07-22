@@ -1,5 +1,7 @@
 # 工单流转
 
+> **【部分过期】** 正式状态机以 **[PRODUCT.md](../../PRODUCT.md)**、`ticket_service.py`、`work_order_service.py` 为准：部门 submit/summary → `awaiting_review`（主单仍 `processing`）；坐席 `review-resolve` → `resolved`；市民满意/管理员代办结 → `closed`；不满意保持 `resolved`；申诉批准后才回 `processing`。
+
 ## 状态机
 
 ```text

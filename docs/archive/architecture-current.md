@@ -1,6 +1,6 @@
 # 当前架构与调用链路
 
-当前开发环境为 Docker Compose **八服务**架构（另含 `worker`）。完整图示、职责、状态机和权限矩阵以 [ENGINEERING.md](../ENGINEERING.md) 与 [PRODUCT.md](../PRODUCT.md) 为准；本文保留调用链路摘要。
+当前开发环境为 Docker Compose **八服务**架构（另含 `worker`）。完整图示、职责、状态机和权限矩阵以 [ENGINEERING.md](../../ENGINEERING.md) 与 [PRODUCT.md](../../PRODUCT.md) 为准；本文保留调用链路摘要。
 
 ```mermaid
 flowchart LR

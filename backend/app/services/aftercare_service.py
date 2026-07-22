@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -10,6 +11,9 @@ from ..models import AppealModel, FollowUpTaskModel, NotificationModel, PhoneFol
 from ..repositories.aftercare import AftercareRepository, NotificationRepository
 from ..repositories.identity import AuditRepository
 from ..schemas import AppealList, AppealRead, FollowUpTaskList, FollowUpTaskRead, NotificationList, NotificationRead, PhoneFollowUpRecordRead
+
+
+logger = logging.getLogger(__name__)
 
 
 APPEAL_LIMIT = 2
@@ -41,8 +45,16 @@ class AftercareService:
         self.notifications = notifications
         self.audit = audit
 
-    def _audit(self, principal, action, resource_type, resource_id, details=None):
-        self.audit.log(principal, action, "success", resource_type, resource_id, details)
+    def _audit(self, principal, action, resource_type, resource_id, details=None, *, commit: bool = True):
+        self.audit.log(principal, action, "success", resource_type, resource_id, details, commit=commit)
+
+    def _emit_best_effort(self, event_type: str, ticket, *, detail: str = "", occurrence: str | int | None = None,
+                          recipient_ids: set[int] | None = None, threshold_level: str = "info") -> None:
+        try:
+            self.emit(event_type, ticket, detail=detail, occurrence=occurrence,
+                      recipient_ids=recipient_ids, threshold_level=threshold_level)
+        except Exception:
+            logger.exception("notification emit failed for %s on %s", event_type, getattr(ticket, "ticket_id", None))
 
     def _role_user_ids(self, *roles: str) -> list[int]:
         return list(self.repository.db.scalars(select(UserModel.id).where(
@@ -158,12 +170,12 @@ class AftercareService:
                 active.result_summary = ticket.public_reply or ticket.resolution_summary
                 active.completed_at = datetime.now(timezone.utc)
                 self.repository.commit()
-                self.emit("appeal_completed", ticket, detail=active.result_summary or "已完成", occurrence=active.appeal_no)
+                self._emit_best_effort("appeal_completed", ticket, detail=active.result_summary or "已完成", occurrence=active.appeal_no)
                 if principal:
                     self._audit(principal, "complete_appeal", "appeal", active.id, {"appeal_no": active.appeal_no})
             self._ensure_follow_up(ticket)
-            self.emit("processing_completed", ticket, occurrence=ticket.handling_round)
-            self.emit("awaiting_confirmation", ticket, occurrence=ticket.handling_round)
+            self._emit_best_effort("processing_completed", ticket, occurrence=ticket.handling_round)
+            self._emit_best_effort("awaiting_confirmation", ticket, occurrence=ticket.handling_round)
             return
         if event_type == "closed":
             for task in ticket.follow_up_tasks:
@@ -171,9 +183,9 @@ class AftercareService:
                     task.status = "cancelled"
                     task.completed_at = datetime.now(timezone.utc)
             self.repository.commit()
-            self.emit("ticket_closed", ticket, occurrence=ticket.handling_round)
+            self._emit_best_effort("ticket_closed", ticket, occurrence=ticket.handling_round)
             return
-        self.emit(event_type, ticket, detail=detail)
+        self._emit_best_effort(event_type, ticket, detail=detail)
 
     def _ensure_follow_up(self, ticket) -> FollowUpTaskModel:
         existing = self.repository.db.scalar(select(FollowUpTaskModel).where(
@@ -289,10 +301,15 @@ class AftercareService:
             content=f"市民提交第 {sequence} 次申诉", previous_status=ticket.status,
             current_status=ticket.status, remark=reason.strip(), visibility="public",
         ))
-        self.repository.commit()
+        try:
+            self._audit(principal, "submit_appeal", "appeal", item.id,
+                        {"ticket_id": ticket.ticket_id, "sequence": sequence}, commit=False)
+            self.repository.commit()
+        except Exception:
+            self.repository.rollback()
+            raise
         self.repository.db.refresh(item)
-        self.emit("appeal_submitted", ticket, occurrence=item.appeal_no)
-        self._audit(principal, "submit_appeal", "appeal", item.id, {"ticket_id": ticket.ticket_id, "sequence": sequence})
+        self._emit_best_effort("appeal_submitted", ticket, occurrence=item.appeal_no)
         return self._appeal_read(item, principal)
 
     def review_appeal(self, appeal_id: str, decision: str, review_comment: str,
@@ -355,9 +372,14 @@ class AftercareService:
             ))
             event = "appeal_approved"
             detail = item.reprocess_instructions
-        self.repository.commit()
-        self.emit(event, ticket, detail=detail, occurrence=item.appeal_no)
-        self._audit(principal, "review_appeal", "appeal", item.id, {"decision": decision, "ticket_id": ticket.ticket_id})
+        try:
+            self._audit(principal, "review_appeal", "appeal", item.id,
+                        {"decision": decision, "ticket_id": ticket.ticket_id}, commit=False)
+            self.repository.commit()
+        except Exception:
+            self.repository.rollback()
+            raise
+        self._emit_best_effort(event, ticket, detail=detail, occurrence=item.appeal_no)
         return self._appeal_read(item, principal)
 
     def record_phone_follow_up(self, task_id: str, ticket_version: int, contact_result: str,
@@ -397,13 +419,17 @@ class AftercareService:
                 content="电话回访确认办理结果，工单办结", previous_status="resolved", current_status="closed",
                 remark=notes.strip(), visibility="public",
             ))
-        self.repository.commit()
+        try:
+            self._audit(principal, "record_phone_follow_up", "follow_up_task", task.id, {
+                "ticket_id": ticket.ticket_id, "contact_result": contact_result, "outcome": outcome,
+            }, commit=False)
+            self.repository.commit()
+        except Exception:
+            self.repository.rollback()
+            raise
         self.repository.db.refresh(record)
         if outcome == "confirmed":
-            self.emit("ticket_closed", ticket, occurrence=f"phone-{task.handling_round}")
+            self._emit_best_effort("ticket_closed", ticket, occurrence=f"phone-{task.handling_round}")
         elif outcome == "appeal_requested" and ticket.creator_user_id:
-            self.emit("appeal_prompt", ticket, occurrence=record.id, recipient_ids={ticket.creator_user_id})
-        self._audit(principal, "record_phone_follow_up", "follow_up_task", task.id, {
-            "ticket_id": ticket.ticket_id, "contact_result": contact_result, "outcome": outcome,
-        })
+            self._emit_best_effort("appeal_prompt", ticket, occurrence=record.id, recipient_ids={ticket.creator_user_id})
         return self._follow_up_read(self.repository.follow_up(task.id))

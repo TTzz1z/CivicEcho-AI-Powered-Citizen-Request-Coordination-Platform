@@ -240,16 +240,31 @@ def remind(ticket_id: str, payload: TicketAction, principal: Principal = Depends
 
 @router.post("/bind-anonymous", response_model=SuccessResponse[dict], status_code=200)
 def bind_anonymous_tickets(payload: dict, principal: Principal = Depends(get_user_principal), db: Session = Depends(get_db)):
-    """Bind anonymous tickets created by sender_id to the logged-in citizen."""
+    """Bind anonymous tickets created by sender_id to the logged-in citizen.
+
+    SECURITY BOUNDARY (not production-grade account recovery):
+    - Ownership proof is possession of the browser-local `sender_id` (SHA-256 hashed
+      at create time as `anonymous_creator_key`). Anyone who obtains that id can claim
+      unbound tickets for it (XSS, shared device, log leak).
+    - Soft guards only: require citizen role; allow `web-anon-*` or the caller's own
+      `web-user-{id}`; reject other accounts' `web-user-*` references.
+    - Do not advertise this as secure cross-device account recovery.
+    """
     from ..authorization import AuthorizationPolicy
+    from ..errors import BusinessError, PermissionDenied
     from ..models import TicketModel
     from ..security import anonymous_creator_key
-    from sqlalchemy import select, update
+    from sqlalchemy import update
     AuthorizationPolicy.require_roles(principal, "citizen")
     sender_id = payload.get("sender_id", "")
-    if not sender_id:
-        from ..errors import BusinessError
+    if not isinstance(sender_id, str) or not sender_id.strip():
         raise BusinessError("INVALID_REQUEST", "缺少 sender_id", 422)
+    sender_id = sender_id.strip()
+    if sender_id.startswith("web-user-"):
+        if sender_id != f"web-user-{principal.user_id}":
+            raise PermissionDenied("无权绑定其他账号的会话工单")
+    elif not sender_id.startswith("web-anon-"):
+        raise BusinessError("INVALID_REQUEST", "不支持的 sender_id 格式", 422)
     anon_key = anonymous_creator_key(sender_id)
     result = db.execute(
         update(TicketModel)

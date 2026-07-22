@@ -1,5 +1,7 @@
 # PostgreSQL 备份与恢复
 
+> **【已收敛】** 现行备份/恢复说明已并入 **[DEPLOYMENT.md](../DEPLOYMENT.md)**。本文保留；文中「第六轮实测 / Alembic 0003」等结果已过期，本轮文档整理未重跑 → 视为未验证。
+
 ## 备份
 
 `scripts/backup-database.ps1` 在 PostgreSQL 容器内执行 `pg_dump -Fc`，再复制到宿主机。备份目录已加入 `.gitignore`。

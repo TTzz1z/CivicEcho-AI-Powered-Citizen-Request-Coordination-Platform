@@ -118,6 +118,7 @@ describe('ChatPage', () => {
     )
     expect(screen.getByTestId('bind-success')).toBeInTheDocument()
     expect(screen.getByText(/已关联 2 条/)).toBeInTheDocument()
+    expect(screen.getByText(/非跨设备账号找回/)).toBeInTheDocument()
     u1()
 
     const { unmount: u2 } = render(

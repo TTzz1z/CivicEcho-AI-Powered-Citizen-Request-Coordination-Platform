@@ -371,7 +371,7 @@ export function BindStatusAlert({
         showIcon
         data-testid="bind-empty"
         message="市民账号已登录"
-        description="未发现可绑定的匿名会话工单；新提交的工单将进入“我的工单”。"
+        description="未发现可绑定的匿名会话工单；新提交的工单将进入“我的工单”。匿名绑定依赖本机会话标识，换设备或清除数据后无法自动找回，请勿分享该标识。"
       />
     )
   }
@@ -383,7 +383,7 @@ export function BindStatusAlert({
         showIcon
         data-testid="bind-binding"
         message="正在绑定匿名会话…"
-        description="请稍候，正在将访客会话中的工单关联到当前账号。"
+        description="请稍候，正在将访客会话中的工单关联到当前账号。此绑定依赖本机会话标识，不是跨设备账号找回。"
       />
     )
   }
@@ -395,7 +395,7 @@ export function BindStatusAlert({
         showIcon
         data-testid="bind-success"
         message="已绑定市民账号"
-        description={boundCount && boundCount > 0 ? `已关联 ${boundCount} 条匿名会话工单；后续工单将进入“我的工单”。` : '工单将进入“我的工单”。'}
+        description={boundCount && boundCount > 0 ? `已关联 ${boundCount} 条匿名会话工单；后续工单将进入“我的工单”。匿名绑定依赖本机会话标识，非跨设备账号找回。` : '工单将进入“我的工单”。匿名绑定依赖本机会话标识，非跨设备账号找回。'}
       />
     )
   }

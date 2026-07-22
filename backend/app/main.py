@@ -27,6 +27,7 @@ from .api.orchestrator import router as orchestrator_router
 from .api.chat_proxy import router as chat_proxy_router
 from .api.kb import router as kb_router
 from .api.ai_usage import router as ai_usage_router
+from .api.dependencies import require_metrics_access
 from .config import get_settings
 from .errors import BusinessError
 from .database import get_db
@@ -41,7 +42,7 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Creator-Reference"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Creator-Reference", "X-Monitoring-Token"],
     expose_headers=["X-Request-ID", "Content-Disposition"],
 )
 app.include_router(auth_router)
@@ -169,8 +170,8 @@ async def unexpected_error_handler(_: Request, exc: Exception):
 
 
 @app.get("/metrics")
-def metrics(db: Session = Depends(get_db)):
-    """Basic operational metrics for monitoring."""
+def metrics(db: Session = Depends(get_db), _: None = Depends(require_metrics_access)):
+    """Internal operational metrics — requires monitoring token or admin JWT."""
     from sqlalchemy import func, select
     from .models import NotificationOutboxModel, TicketModel
     ticket_counts = dict(db.execute(

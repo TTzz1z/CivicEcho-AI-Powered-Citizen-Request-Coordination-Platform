@@ -46,29 +46,39 @@ def test_ai_is_advisory_idempotent_and_audited(actors):
     assert created.status_code == 201, created.text
     ticket = created.json()["data"]["ticket"]
     before_status, before_version = ticket["status"], ticket["version"]
-    payload = {"suggestion_types": ["assignment", "similarity", "summary", "completeness", "document_draft", "risk"]}
+    # Agent triage boundary: triage_assistant only (document_draft is handling-side / 403 for agent).
+    payload = {"suggestion_types": ["triage_assistant"], "capability": "triage_assistant"}
     response = client.post(f"/api/v1/ai/tickets/{ticket['ticket_id']}/analyze", headers=headers(actors["agent"]), json=payload)
     assert response.status_code == 200, response.text
     suggestions = response.json()["data"]
-    assert {item["suggestion_type"] for item in suggestions} == set(payload["suggestion_types"])
-    risk = next(item for item in suggestions if item["suggestion_type"] == "risk")
-    assert risk["risk_level"] == "urgent" and risk["advisory_only"] is True
-    draft = next(item for item in suggestions if item["suggestion_type"] == "document_draft")
-    assert draft["result"]["requires_fact_check"] is True
+    assert {item["suggestion_type"] for item in suggestions} == {"triage_assistant"}
+    triage = suggestions[0]
+    assert triage["risk_level"] == "urgent" and triage["advisory_only"] is True
+    assert triage["result"].get("advisory_only") is True
+    assert "intake_notice_draft" in triage["result"]
+    assert "verification_checklist" not in triage["result"]
+
+    # Product gate: agent must not generate handling document drafts.
+    blocked = client.post(
+        f"/api/v1/ai/tickets/{ticket['ticket_id']}/analyze",
+        headers=headers(actors["agent"]),
+        json={"suggestion_types": ["document_draft"]},
+    )
+    assert blocked.status_code == 403, blocked.text
 
     repeated = client.post(f"/api/v1/ai/tickets/{ticket['ticket_id']}/analyze", headers=headers(actors["agent"]), json=payload)
     assert [item["id"] for item in repeated.json()["data"]] == [item["id"] for item in suggestions]
     detail = client.get(f"/api/v1/tickets/{ticket['ticket_id']}", headers=headers(actors["agent"])).json()["data"]
     assert (detail["status"], detail["version"]) == (before_status, before_version)
 
-    reviewed = client.post(f"/api/v1/ai/suggestions/{risk['id']}/review", headers=headers(actors["agent"]),
+    reviewed = client.post(f"/api/v1/ai/suggestions/{triage['id']}/review", headers=headers(actors["agent"]),
                            json={"decision": "helpful", "comment": "已转人工核实"})
     assert reviewed.status_code == 200 and reviewed.json()["data"]["review_decision"] == "helpful"
     with SessionLocal() as db:
         actions = set(db.scalars(select(AuditLogModel.action).where(
             AuditLogModel.resource_id.in_([item["id"] for item in suggestions])
         )).all())
-        assert {"generate_ai_suggestion", "review_ai_suggestion"}.issubset(actions)
+        assert {"generate_ai_suggestion", "review_ai_suggestion_quality"}.issubset(actions)
 
 
 def test_role_boundaries_hotspots_and_safe_integration_fallback(actors):

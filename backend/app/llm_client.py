@@ -10,6 +10,8 @@ Round 2 changes:
   that don't ask for JSON) can still benefit from usage parsing.
 - All HTTP calls go through a single `_post_chat()` helper so prompt version,
   timeout and auth header stay consistent.
+- JSON-mode responses that are not valid JSON return success=False so callers
+  can degrade to rules without persisting unchecked payloads.
 """
 import json
 import logging
@@ -376,6 +378,14 @@ class LlmClient:
                 data = json.loads(stripped)
                 if isinstance(data, dict):
                     data["advisory_only"] = True
+                else:
+                    # JSON mode must yield an object for structured capabilities.
+                    logger.warning("LLM JSON root is not an object for %s: %s", capability, type(data).__name__)
+                    return LlmResult(
+                        success=False, data=None, model=self.model, content=content,
+                        latency_ms=latency_ms, error="json_root_not_object",
+                        error_code="json_root_not_object", usage=usage,
+                    )
             except json.JSONDecodeError:
                 logger.warning("LLM JSON parse failed for %s: %s", capability, stripped[:200])
                 # Return success=False for JSON-mode calls that didn't yield valid JSON

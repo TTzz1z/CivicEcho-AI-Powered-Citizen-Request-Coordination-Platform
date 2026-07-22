@@ -79,6 +79,13 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 
 def anonymous_creator_key(reference: str | None) -> str | None:
+    """Hash a creator_reference / sender_id for anonymous ticket ownership.
+
+    SECURITY BOUNDARY: the hash is not a secret by itself — anyone who knows the
+    plaintext `sender_id` (e.g. from localStorage) can derive the same key and claim
+    unbound tickets via bind-anonymous. This is a best-effort browser-session link,
+    not production-grade account recovery.
+    """
     if not reference:
         return None
     return hashlib.sha256(reference.encode("utf-8")).hexdigest()

@@ -64,10 +64,50 @@ describe('IntelligencePage role split', () => {
     expect(screen.queryByText('处理文书草稿')).not.toBeInTheDocument()
     expect(screen.queryByText('现场核查清单')).not.toBeInTheDocument()
     expect(analyzeTicket).toHaveBeenCalledWith('QT2026071400000001', ['triage_assistant'], 'triage_assistant')
-    expect(screen.getByRole('button', { name: '采纳分派建议' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '记录为已采纳' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '记录修改后采纳' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '前往工单详情继续办理' })).toBeInTheDocument()
+    expect(screen.getByText(/采纳仅记审核决策，不会自动派发/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '采纳分派建议' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '同步建议到工单详情' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '有帮助' })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '有帮助' }))
     await waitFor(() => expect(reviewSuggestion).toHaveBeenCalledWith('t1', 'helpful'))
+  })
+
+  it('department adopt buttons record opinion and do not claim auto draft write', async () => {
+    authState.user = { id: 3, role: 'department_staff', display_name: '部门' }
+    vi.mocked(analyzeTicket).mockResolvedValue([{
+      id: 'h1',
+      ticket_id: 'QT2026071400000001',
+      suggestion_type: 'handling_assistant',
+      status: 'completed',
+      risk_level: 'attention',
+      confidence: 0,
+      provider: 'rules',
+      model_name: 'rules',
+      result: {
+        case_summary: { description: '路灯', assigned_department: '综合受理', classification: '路灯', known_facts: [] },
+        verification_checklist: ['核实杆号'],
+        handling_plan: ['现场核查'],
+        risk_warnings: ['临近 SLA'],
+        policy_references: ['照明管理办法'],
+        missing_handling_facts: ['处理措施'],
+        reply_draft: '经现场核查，该设施位于【位置】',
+        facts_sufficient: false,
+      },
+      explanation: 'capability=handling_assistant',
+      created_at: '2026-07-14T10:00:00Z',
+      advisory_only: true,
+    }])
+    renderApp(<MemoryRouter><IntelligencePage /></MemoryRouter>)
+    await userEvent.type(screen.getByLabelText('工单编号'), 'QT2026071400000001')
+    await userEvent.click(screen.getByRole('button', { name: '生成办件建议' }))
+    expect(await screen.findByRole('button', { name: '记录采纳意见' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '插入办理草稿记录' })).not.toBeInTheDocument()
+    expect(screen.getAllByText(/不会自动派发、填写办理结果或办结/).length).toBeGreaterThanOrEqual(1)
+    await userEvent.click(screen.getByRole('button', { name: '记录采纳意见' }))
+    await waitFor(() => expect(reviewSuggestion).toHaveBeenCalledWith('h1', 'adopted'))
   })
 
   it('department page shows handling checklist and calls handling capability', async () => {

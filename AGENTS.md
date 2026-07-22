@@ -5,7 +5,7 @@
 ## 权威基线
 
 - 产品范围：`PRODUCT.md`、`ENGINEERING.md`。
-- 已验证现状：`docs/final-test-report.md` 与仓库内可复现测试命令；文档不得夸大未验证能力。
+- 已验证现状：`docs/TESTING.md` 与仓库内可复现测试命令；历史收口稿见 `docs/archive/final-test-report.md`。文档不得夸大未验证能力。
 - 项目说明、架构和操作文档：`README.md` 与 `docs/`；若其描述与当前代码冲突，应更新文档。
 
 ## 代码与架构边界

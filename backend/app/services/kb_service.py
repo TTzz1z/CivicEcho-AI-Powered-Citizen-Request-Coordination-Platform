@@ -24,6 +24,10 @@ from ..embedding_client import get_embedding_client
 from ..errors import BusinessError, PermissionDenied
 from ..llm_client import get_llm_client
 from ..logging_config import request_id_context
+from ..ai_schemas import (
+    build_conservative_rag_answer,
+    validate_rag_citations,
+)
 from ..models import (
     AiSuggestionModel,
     KbChunkModel,
@@ -1212,6 +1216,11 @@ class KnowledgeBaseService:
                 "retrieval_count": 0,
                 "latency_ms": latency_ms,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
+                "provider": "rules",
+                "model": "rules",
+                "degraded": True,
+                "degrade_reason": "no_evidence",
+                "usage_unavailable": True,
             }
 
         # Build context & citations
@@ -1250,18 +1259,63 @@ class KnowledgeBaseService:
             query, context, principal, route=route,
             session_id=session_id, request_id=request_id,
         )
-        result = {
+        provider, model, degraded, degrade_reason, usage_unavailable = self._llm_status_fields(
+            llm_used=llm_used,
+            llm_result=llm_result,
+            llm_client=get_llm_client(),
+        )
+        answer, provider, model, degraded, degrade_reason, usage_unavailable = self._apply_citation_guard(
+            answer=answer,
+            citations=citations,
+            provider=provider,
+            model=model,
+            degraded=degraded,
+            degrade_reason=degrade_reason,
+            usage_unavailable=usage_unavailable,
+            principal=principal,
+            route=route,
+            session_id=session_id,
+            request_id=request_id,
+        )
+        return {
             "answer": answer,
             "citations": citations,
             "no_evidence": False,
             "retrieval_count": len(chunks),
             "latency_ms": latency_ms,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "provider": (llm_result.model if llm_used and llm_result and llm_result.success else "rules"),
-            "model": (llm_result.model if llm_used and llm_result and llm_result.success else "rules-v2"),
-            "degraded": (llm_used and llm_result and not llm_result.success),
+            "provider": provider,
+            "model": model,
+            "degraded": degraded,
+            "degrade_reason": degrade_reason,
+            "usage_unavailable": usage_unavailable,
         }
-        return result
+
+    @staticmethod
+    def _llm_status_fields(*, llm_used: bool, llm_result: Any, llm_client) -> tuple[str, str, bool, Optional[str], bool]:
+        """Derive honest provider/model/degraded/degrade_reason/usage_unavailable."""
+        if llm_used and llm_result is not None and llm_result.success:
+            usage = getattr(llm_result, "usage", None)
+            unavailable = bool(getattr(usage, "unavailable", True)) if usage is not None else True
+            return (
+                getattr(llm_client, "provider", None) or "deepseek",
+                llm_result.model or getattr(llm_client, "model", "unknown"),
+                False,
+                None,
+                unavailable,
+            )
+        if llm_used and llm_result is not None and not llm_result.success:
+            usage = getattr(llm_result, "usage", None)
+            unavailable = bool(getattr(usage, "unavailable", True)) if usage is not None else True
+            return (
+                "rules",
+                "rules-v2",
+                True,
+                llm_result.error_code or "llm_call_failed",
+                unavailable,
+            )
+        # LLM not used (unavailable / not configured)
+        return ("rules", "rules-v2", True, "llm_unavailable", True)
 
     def _generate_answer(self, query: str, context: str, principal: Principal, *,
                          route: str = "citizen_query",
@@ -1345,11 +1399,46 @@ class KnowledgeBaseService:
                 model_name="rules-v2",
                 degrade_reason="llm_unavailable",
             )
-        # Fallback: return raw chunks as a basic answer
-        first = context.split("\n\n")[0][:500] if context else ""
-        return (f"根据检索到的相关资料：\n\n{first}\n\n"
-                f"（注：因 LLM 不可用，以上为原始片段，建议联系管理员启用 AI 服务以获得完整回答）",
-                False, None)
+        # Fallback: conservative answer; rag_answer always re-validates citations.
+        return (
+            build_conservative_rag_answer(
+                _citations_from_context_headers(context),
+                reason="llm_unavailable",
+            ),
+            False,
+            None,
+        )
+
+    def _apply_citation_guard(
+        self,
+        *,
+        answer: str,
+        citations: list[dict],
+        provider: str,
+        model: str,
+        degraded: bool,
+        degrade_reason: Optional[str],
+        usage_unavailable: bool,
+        principal: Principal,
+        route: str,
+        session_id: Optional[str],
+        request_id: Optional[str],
+    ) -> tuple[str, str, str, bool, Optional[str], bool]:
+        """Validate [来源N] against citations; degrade to conservative answer if needed."""
+        citation_check = validate_rag_citations(answer, citations)
+        if citation_check.ok:
+            return answer, provider, model, degraded, degrade_reason, usage_unavailable
+        reason = citation_check.degrade_reason or "citation_validation_failed"
+        safe_answer = build_conservative_rag_answer(citations, reason=reason)
+        AiUsageRecorder(self.db).record_rules_call(
+            make_context(self._capability_for_route(route), route=route,
+                         principal=principal, session_id=session_id,
+                         request_id=request_id or request_id_context.get()),
+            model_name="rules-citation-guard",
+            degrade_reason=reason,
+        )
+        # Prefer rules labels when the final text is the conservative rules answer.
+        return safe_answer, "rules", "rules-citation-guard", True, reason, True
 
     @staticmethod
     def _capability_for_route(route: str) -> str:
@@ -1687,6 +1776,9 @@ class KnowledgeBaseService:
                 "advisory_only": True,
                 "provider": "rules",
                 "model": "rules",
+                "degraded": True,
+                "degrade_reason": "no_evidence",
+                "usage_unavailable": True,
             })
 
         # Generate structured advice via LLM
@@ -1736,6 +1828,8 @@ class KnowledgeBaseService:
                     if content.startswith("```"):
                         content = content.split("\n", 1)[1].rsplit("```", 1)[0]
                     advice = json.loads(content)
+                    if not isinstance(advice, dict):
+                        raise ValueError("advice payload is not an object")
                     # Round 2 r2-7: ensure all required fields are present with
                     # sensible defaults so callers can rely on the schema.
                     advice.setdefault("summary", description[:100] if description else "")
@@ -1757,9 +1851,46 @@ class KnowledgeBaseService:
                     advice["provider"] = llm.provider or "deepseek"
                     advice["model"] = llm.model
                     advice["advisory_only"] = True
+                    usage = getattr(llm_result, "usage", None)
+                    advice["usage_unavailable"] = bool(
+                        getattr(usage, "unavailable", True) if usage is not None else True
+                    )
+                    # Validate citations across all textual fields; never invent citations.
+                    blob = json.dumps(
+                        {k: v for k, v in advice.items() if k != "citations"},
+                        ensure_ascii=False,
+                    )
+                    citation_check = validate_rag_citations(blob, citations)
+                    if not citation_check.ok:
+                        reason = citation_check.degrade_reason or "citation_validation_failed"
+                        AiUsageRecorder(self.db).record_rules_call(
+                            make_context(CAP_TICKET_ADVICE, route="ticket_advice",
+                                         principal=principal, request_id=rid),
+                            model_name="rules-citation-guard",
+                            degrade_reason=reason,
+                        )
+                        return self._persist_ticket_advice(
+                            ticket, principal,
+                            self._rules_ticket_advice_payload(
+                                description=description,
+                                category_name=category_name,
+                                chunks=chunks,
+                                citations=citations,
+                                generated_at=generated_at,
+                                degrade_reason=reason,
+                            ),
+                        )
+                    advice["degraded"] = False
+                    advice["degrade_reason"] = None
                     return self._persist_ticket_advice(ticket, principal, advice)
-                except (json.JSONDecodeError, KeyError) as exc:
+                except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                     logger.warning("ticket advice JSON parse failed: %s", exc)
+                    AiUsageRecorder(self.db).record_rules_call(
+                        make_context(CAP_TICKET_ADVICE, route="ticket_advice",
+                                     principal=principal, request_id=rid),
+                        model_name="rules-v2",
+                        degrade_reason="schema_validation_failed",
+                    )
             else:
                 logger.warning("ticket advice LLM failed: %s", llm_result.error or "no content")
         else:
@@ -1772,11 +1903,35 @@ class KnowledgeBaseService:
             )
 
         # Fallback: rule-based advice with retrieved citations
-        return self._persist_ticket_advice(ticket, principal, {
+        return self._persist_ticket_advice(
+            ticket, principal,
+            self._rules_ticket_advice_payload(
+                description=description,
+                category_name=category_name,
+                chunks=chunks,
+                citations=citations,
+                generated_at=generated_at,
+                degrade_reason=("llm_unavailable" if not llm.available else "llm_call_failed"),
+            ),
+        )
+
+    @staticmethod
+    def _rules_ticket_advice_payload(
+        *,
+        description: str,
+        category_name: str,
+        chunks: list[dict],
+        citations: list[dict],
+        generated_at: str,
+        degrade_reason: str,
+    ) -> dict:
+        return {
             "summary": description[:100] if description else "",
             "suggested_category": category_name or "",
             "suggested_department": "",
-            "applicable_policies": [c["document"]["title"] for c in chunks[:3]],
+            "applicable_policies": [
+                f"{c['document']['title']}[来源{i + 1}]" for i, c in enumerate(chunks[:3])
+            ],
             "missing_materials": (
                 ["市民描述较简略，建议联系补充"] if len(description) <= 20 else []
             ),
@@ -1812,7 +1967,10 @@ class KnowledgeBaseService:
             "provider": "rules",
             "model": "rules-v2",
             "advisory_only": True,
-        })
+            "degraded": True,
+            "degrade_reason": degrade_reason,
+            "usage_unavailable": True,
+        }
 
     # ====================================================================
     # Helpers
@@ -1951,6 +2109,30 @@ _NO_EVIDENCE_MESSAGE = (
     "3. 创建咨询工单：如果您希望相关部门跟进回复，请回复“创建咨询工单”，我会引导您填写工单草稿（仅在您明确确认后才会建单）。\n"
     "（您的问题已记录用于后续政策补充。）"
 )
+
+
+_CONTEXT_SOURCE_RE = re.compile(r"\[来源(\d+)\s*:")
+
+
+def _citations_from_context_headers(context: str) -> list[dict]:
+    """Best-effort reconstruct citation stubs from RAG context headers for fallback answers."""
+    citations: list[dict] = []
+    seen: set[int] = set()
+    for match in _CONTEXT_SOURCE_RE.finditer(context or ""):
+        idx = int(match.group(1))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        # Slice a short excerpt after the header line.
+        start = match.end()
+        end = (context or "").find("\n\n", start)
+        excerpt = (context or "")[start: end if end != -1 else start + 240].strip()[:240]
+        citations.append({
+            "index": idx,
+            "title": f"来源{idx}",
+            "excerpt": excerpt or "（原始检索片段）",
+        })
+    return citations
 
 
 def _parse_iso(value) -> Optional[datetime]:

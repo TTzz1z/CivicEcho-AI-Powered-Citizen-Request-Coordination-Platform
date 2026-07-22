@@ -54,10 +54,29 @@ class _Cat:
         self.default_department_id = default_department_id
 
 
+class _FakeDb:
+    """No-op session so AiService commit/rollback after add(..., commit=False) succeeds."""
+
+    def add(self, *_a, **_k):
+        pass
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def flush(self):
+        pass
+
+    def refresh(self, *_a, **_k):
+        pass
+
+
 class _Repo:
     def __init__(self, ticket):
         self._ticket = ticket
-        self.db = None
+        self.db = _FakeDb()
         self.added = []
 
     def ticket(self, ticket_id):
@@ -66,13 +85,15 @@ class _Repo:
     def existing(self, *_args, **_kwargs):
         return None
 
-    def add(self, item):
+    def add(self, item, *, commit: bool = True):
+        del commit  # in-memory fake has no transactional boundary
         if getattr(item, "created_at", None) is None:
             item.created_at = datetime.now(timezone.utc)
         self.added.append(item)
         return item
 
-    def save(self, item):
+    def save(self, item, *, commit: bool = True):
+        del commit
         return item
 
     def get(self, suggestion_id):

@@ -24,7 +24,7 @@ export interface Ticket {
   source: string; version: number; accepted_at?: string | null; resolved_at?: string | null; closed_at?: string | null; created_at: string; updated_at: string;
   resolution_summary?:string|null; resolution_measures?:string|null; resolution_outcome?:'resolved'|'partially_resolved'|'unresolved'|null;
   public_reply?:string|null; internal_note?:string|null; rejection_reason_code?:string|null; rejection_detail?:string|null;
-  suggested_channel?:string|null; needs_supplement:boolean; closure_type?:'citizen_confirmed'|'admin_override'|null;
+  suggested_channel?:string|null; needs_supplement:boolean; closure_type?:'citizen_confirmed'|'phone_confirmed'|'admin_override'|null;
   accept_due_at?:string|null; resolve_due_at?:string|null; remaining_seconds?:number|null; is_overdue:boolean; sla_state:'on_track'|'due_soon'|'overdue'|'paused'; sla_paused_at?:string|null; sla_pause_reason?:string|null; total_paused_seconds:number; reminder_count:number;
   collaboration_status:CollaborationStatus; supplement_reason?:string|null; supplement_requested_at?:string|null; supplemented_at?:string|null;
   dispatch_return_reason?:string|null; dispute_reason?:string|null; dispute_resolution?:string|null;

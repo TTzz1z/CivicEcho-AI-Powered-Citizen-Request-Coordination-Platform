@@ -5,6 +5,11 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from ..ai_schemas import (
+    FABRICATED_HANDLING_FACTS,
+    validate_handling_response,
+    validate_triage_response,
+)
 from ..authorization import AuthorizationPolicy, Principal
 from ..errors import BusinessError, PermissionDenied, TicketNotFound
 from ..llm_client import get_llm_client
@@ -20,11 +25,14 @@ from .ai_usage_recorder import (
     CAP_HANDLING_ASSISTANT,
 )
 
+# Re-export capability constants for tests / callers.
+__all__ = ("AiService", "CAP_TRIAGE_ASSISTANT", "CAP_HANDLING_ASSISTANT", "DEFAULT_INTAKE_NOTICE")
+
 
 SENSITIVE_WORDS = ("上访", "群体性", "暴恐", "爆炸", "自杀", "伤亡", "疫情", "邪教", "未成年人")
 URGENT_WORDS = ("火灾", "燃气泄漏", "坍塌", "触电", "有人受伤", "生命危险", "立即", "紧急")
 STOP_CHARS = set("，。！？；：、,.!?;: \t\r\n")
-TRIAGE_FORBIDDEN = ("已经解决", "已经修复", "已完成维修", "已现场核查", "已派人", "已恢复正常", "已经办结")
+TRIAGE_FORBIDDEN = FABRICATED_HANDLING_FACTS
 HANDLING_FACT_FIELDS = (
     "resolution_summary", "resolution_measures", "resolution_outcome", "public_reply",
 )
@@ -247,7 +255,11 @@ class AiService:
                 "assignment_score": assignment_score,
             },
         }
-        return self._sanitize_triage_payload(payload), None
+        sanitized = self._sanitize_triage_payload(payload)
+        checked = validate_triage_response(sanitized)
+        if checked.ok and checked.data:
+            return checked.data, None
+        return sanitized, None
 
     def _handling_bundle(self, ticket):
         facts_ok = self._handling_facts_sufficient(ticket)
@@ -310,11 +322,16 @@ class AiService:
             "advisory_only": True,
         }
         if not facts_ok:
-            lowered = reply_draft
+            blob = json.dumps(payload, ensure_ascii=False)
             for phrase in TRIAGE_FORBIDDEN:
-                if phrase in lowered:
+                if phrase in blob:
                     payload["reply_draft"] = reply_template
+                    payload["handling_plan"] = plan
                     break
+        # Ensure rules path also satisfies strict schema before persistence.
+        validated = validate_handling_response(payload, facts_sufficient=facts_ok)
+        if validated.ok and validated.data:
+            return validated.data, None
         return payload, None
 
     @staticmethod
@@ -332,6 +349,26 @@ class AiService:
         for phrase in TRIAGE_FORBIDDEN:
             notice = notice.replace(phrase, "")
         payload["intake_notice_draft"] = notice.strip() or DEFAULT_INTAKE_NOTICE
+        payload["advisory_only"] = True
+        payload["capability"] = CAP_TRIAGE_ASSISTANT
+        return payload
+
+    @staticmethod
+    def _stamp_degrade_meta(
+        payload: dict,
+        *,
+        provider: str,
+        model: str,
+        degraded: bool,
+        degrade_reason: str | None,
+        usage_unavailable: bool,
+    ) -> dict:
+        payload = dict(payload)
+        payload["provider"] = provider
+        payload["model"] = model
+        payload["degraded"] = bool(degraded)
+        payload["degrade_reason"] = degrade_reason
+        payload["usage_unavailable"] = bool(usage_unavailable)
         payload["advisory_only"] = True
         return payload
 
@@ -422,9 +459,16 @@ class AiService:
             prompt_version = None
             latency_ms = 0
             used_llm = False
+            degraded = False
+            degrade_reason = None
+            usage_unavailable = True
+            schema_reject_reason = None
             if suggestion_type in llm_types and llm.available:
                 context = self._llm_context(ticket, suggestion_type)
                 llm_result = llm.complete(suggestion_type, context)
+                usage_unavailable = bool(
+                    getattr(getattr(llm_result, "usage", None), "unavailable", True)
+                )
                 recorder.record_llm_call(
                     make_context(usage_cap, route=usage_cap,
                                  principal=principal, request_id=request_id),
@@ -433,33 +477,82 @@ class AiService:
                     degrade_reason="llm_call_failed" if not llm_result.success else None,
                 )
                 if llm_result.success and llm_result.data:
-                    payload = llm_result.data
-                    provider = "deepseek"
-                    model_name = llm_result.model
-                    prompt_version = llm_result.prompt_version
-                    latency_ms = llm_result.latency_ms
-                    confidence = 0  # model self-score is not a reliable metric
-                    used_llm = True
+                    candidate = llm_result.data
+                    accepted = True
                     if suggestion_type == CAP_TRIAGE_ASSISTANT:
-                        payload = self._sanitize_triage_payload(payload)
-                    if suggestion_type == CAP_HANDLING_ASSISTANT and not self._handling_facts_sufficient(ticket):
-                        payload["facts_sufficient"] = False
-                        payload["reply_draft"] = payload.get("reply_template") or PLACEHOLDER_REPLY
-                        payload["missing_handling_facts"] = payload.get("missing_handling_facts") or [
-                            "核查结果/处理摘要", "处理措施", "对市民回复要点",
-                        ]
+                        candidate = self._sanitize_triage_payload(candidate)
+                        checked = validate_triage_response(candidate)
+                        if not checked.ok:
+                            accepted = False
+                            schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
+                        else:
+                            candidate = checked.data
+                    elif suggestion_type == CAP_HANDLING_ASSISTANT:
+                        facts_ok = self._handling_facts_sufficient(ticket)
+                        if not facts_ok:
+                            candidate = dict(candidate)
+                            candidate["facts_sufficient"] = False
+                            if not candidate.get("reply_template"):
+                                candidate["reply_template"] = PLACEHOLDER_REPLY
+                        checked = validate_handling_response(candidate, facts_sufficient=facts_ok)
+                        if not checked.ok:
+                            accepted = False
+                            schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
+                        else:
+                            candidate = checked.data
+                    if accepted:
+                        payload = candidate
+                        provider = llm.provider or "deepseek"
+                        model_name = llm_result.model
+                        prompt_version = llm_result.prompt_version
+                        latency_ms = llm_result.latency_ms
+                        confidence = 0  # model self-score is not a reliable metric
+                        used_llm = True
+                        degraded = False
+                        degrade_reason = None
+                    else:
+                        # Do NOT persist unchecked LLM JSON.
+                        payload = None
+                        degraded = True
+                        degrade_reason = schema_reject_reason
+                else:
+                    degraded = True
+                    degrade_reason = (
+                        llm_result.error_code
+                        if llm_result and llm_result.error_code
+                        else "llm_call_failed"
+                    )
             if payload is None:
+                rules_reason = (
+                    degrade_reason
+                    or ("rules_fallback" if llm.available else "llm_unavailable")
+                )
                 if suggestion_type in llm_types:
                     recorder.record_rules_call(
                         make_context(usage_cap, route=usage_cap,
                                      principal=principal, request_id=request_id),
                         model_name="rules",
-                        degrade_reason="rules_fallback" if llm.available else "llm_unavailable",
+                        degrade_reason=rules_reason,
                     )
                 built = builders[suggestion_type](ticket)
                 payload, confidence = built[0], built[1]
                 if confidence is None:
                     confidence = 0
+                provider = "rules"
+                model_name = "rules"
+                used_llm = False
+                degraded = True
+                degrade_reason = rules_reason
+                usage_unavailable = True
+            if suggestion_type in {CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}:
+                payload = self._stamp_degrade_meta(
+                    payload,
+                    provider=provider,
+                    model=model_name,
+                    degraded=degraded,
+                    degrade_reason=degrade_reason,
+                    usage_unavailable=usage_unavailable,
+                )
             risk_level = payload.get("level", "attention" if payload.get("possible_duplicate") else "none")
             if suggestion_type in {CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}:
                 urgency = (payload.get("urgency") or {})
@@ -467,7 +560,10 @@ class AiService:
             explanation = (
                 f"由 {model_name} 生成（capability={usage_cap}），仅供人工参考，不会自动变更工单状态。"
                 if used_llm
-                else f"基于规则与可见工单数据生成（capability={usage_cap}）；结果仅供人工参考。"
+                else (
+                    f"基于规则与可见工单数据生成（capability={usage_cap}"
+                    f"{f', degrade={degrade_reason}' if degrade_reason else ''}）；结果仅供人工参考。"
+                )
             )
             item = AiSuggestionModel(
                 id=str(uuid4()), ticket_id=ticket.ticket_id, suggestion_type=suggestion_type,
@@ -479,12 +575,18 @@ class AiService:
                 generated_by_user_id=principal.user_id,
                 created_at=datetime.now(timezone.utc),
             )
-            result.append(self._present(self.repository.add(item)))
-            self.audit.log(principal, "generate_ai_suggestion", resource_type="ai_suggestion", resource_id=item.id,
-                           details={"ticket_id": ticket.ticket_id, "suggestion_type": suggestion_type,
-                                    "capability": usage_cap,
-                                    "provider": provider, "model": model_name, "prompt_version": prompt_version,
-                                    "latency_ms": latency_ms, "advisory_only": True})
+            result.append(self._present(self.repository.add(item, commit=False)))
+            try:
+                self.audit.log(principal, "generate_ai_suggestion", resource_type="ai_suggestion", resource_id=item.id,
+                               details={"ticket_id": ticket.ticket_id, "suggestion_type": suggestion_type,
+                                        "capability": usage_cap,
+                                        "provider": provider, "model": model_name, "prompt_version": prompt_version,
+                                        "latency_ms": latency_ms, "advisory_only": True},
+                               commit=False)
+                self.repository.db.commit()
+            except Exception:
+                self.repository.db.rollback()
+                raise
         return result
 
     def _llm_context(self, ticket, suggestion_type: str) -> dict:
@@ -550,15 +652,21 @@ class AiService:
             merged = json.loads(item.result_json)
             merged["edited_content"] = edited_content
             item.result_json = json.dumps(merged, ensure_ascii=False)
-        item = self.repository.save(item)
-        self.audit.log(principal, action, resource_type="ai_suggestion", resource_id=item.id,
-                       details={
-                           "decision": decision,
-                           "ticket_id": item.ticket_id,
-                           "suggestion_type": item.suggestion_type,
-                           "ticket_status_unchanged": ticket.status,
-                           "status_before": status_before,
-                       })
+        try:
+            item = self.repository.save(item, commit=False)
+            self.audit.log(principal, action, resource_type="ai_suggestion", resource_id=item.id,
+                           details={
+                               "decision": decision,
+                               "ticket_id": item.ticket_id,
+                               "suggestion_type": item.suggestion_type,
+                               "ticket_status_unchanged": ticket.status,
+                               "status_before": status_before,
+                           },
+                           commit=False)
+            self.repository.db.commit()
+        except Exception:
+            self.repository.db.rollback()
+            raise
         # Re-load ticket to assert status was not mutated by AI review.
         refreshed = self.repository.ticket(item.ticket_id)
         if refreshed and refreshed.status != status_before:

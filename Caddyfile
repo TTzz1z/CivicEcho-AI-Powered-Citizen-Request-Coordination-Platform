@@ -1,4 +1,8 @@
 {$SITE_ADDRESS:localhost} {
+	# Defense in depth: never reverse-proxy internal operational metrics.
+	handle /metrics* {
+		respond 404
+	}
 	handle /api/* {
 		reverse_proxy backend:8000
 	}

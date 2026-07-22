@@ -122,7 +122,9 @@ services:
       MONITORING_ENDPOINT: "${MONITORING_ENDPOINT:-}"
       MONITORING_TOKEN: "${MONITORING_TOKEN:-}"
     ports:
-      - "${BACKEND_PORT:-8001}:8000"
+      # Local-only: /metrics and the API must not be LAN/WAN reachable by default.
+      # In-cluster healthchecks use backend:8000; prod override clears host ports.
+      - "127.0.0.1:${BACKEND_PORT:-8001}:8000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -113,7 +114,7 @@ class Settings(BaseSettings):
             raise ValueError("OIDC issuer, client credentials and redirect URI are required when OIDC is enabled")
         if self.app_env.lower() not in {"production", "prod"}:
             return self
-        weak_markers = {"change-me", "development", "example", "default", "password"}
+        weak_markers = {"change-me", "development", "example", "default", "password", "minioadmin"}
         for name, value, minimum in (
             ("JWT_SECRET", self.jwt_secret, 32),
             ("SERVICE_API_TOKEN", self.service_api_token, 32),
@@ -145,6 +146,17 @@ class Settings(BaseSettings):
         storage_values = f"{self.object_storage_access_key} {self.object_storage_secret_key}".lower()
         if any(marker in storage_values for marker in weak_markers):
             raise ValueError("object storage credentials are weak or still use a placeholder")
+        if (self.monitoring_token or "").strip():
+            monitoring = self.monitoring_token.strip()
+            if len(monitoring) < 32 or any(marker in monitoring.lower() for marker in weak_markers):
+                raise ValueError("MONITORING_TOKEN is weak or still uses a placeholder")
+        seed_password = (os.environ.get("SEED_PASSWORD") or os.environ.get("LOCAL_SEED_PASSWORD") or "").strip()
+        if seed_password:
+            forbidden_seed = {
+                "password", "123456789012", "change-me", "admin123456", "tingting-seed-demo-2026",
+            }
+            if len(seed_password) < 12 or seed_password.lower() in forbidden_seed:
+                raise ValueError("SEED_PASSWORD must not use a default/demo password in production")
         return self
 
 

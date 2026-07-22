@@ -1041,8 +1041,11 @@ def _password() -> str:
     password = os.getenv("SEED_PASSWORD") or os.getenv("LOCAL_SEED_PASSWORD")
     if not password or len(password) < 12:
         raise SystemExit("SEED_PASSWORD 必须通过环境变量显式设置且至少 12 个字符")
-    forbidden = {"password", "123456789012", "change-me", "admin123456"}
-    if password.lower() in forbidden:
+    forbidden = {"password", "123456789012", "change-me", "admin123456", "tingting-seed-demo-2026"}
+    app_env = (os.getenv("APP_ENV") or "development").strip().lower()
+    if password.lower() in forbidden and app_env in {"production", "prod"}:
+        raise SystemExit("SEED_PASSWORD 不得在 production 使用默认或 demo 密码")
+    if password.lower() in {"password", "123456789012", "change-me", "admin123456"}:
         raise SystemExit("SEED_PASSWORD 不得使用默认或弱密码")
     return password
 

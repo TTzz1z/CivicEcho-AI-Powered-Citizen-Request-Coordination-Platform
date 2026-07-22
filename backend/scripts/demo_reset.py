@@ -79,8 +79,13 @@ def assert_safe_to_reset(*, confirm_reset: bool) -> None:
     Uses process environment only so production refusal works before Settings
     validators (malware scan etc.) are loaded.
     """
-    if not os.environ.get("SEED_PASSWORD"):
+    seed_password = (os.environ.get("SEED_PASSWORD") or "").strip()
+    if not seed_password or len(seed_password) < 12:
         print("ERROR: SEED_PASSWORD must be set (>=12 chars)")
+        sys.exit(1)
+    forbidden_seed = {"password", "123456789012", "change-me", "admin123456"}
+    if seed_password.lower() in forbidden_seed:
+        print("ERROR: SEED_PASSWORD must not use a default/weak password")
         sys.exit(1)
 
     app_env = (os.environ.get("APP_ENV") or "development").strip().lower()

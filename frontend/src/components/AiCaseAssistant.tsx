@@ -19,9 +19,9 @@ interface Props {
 }
 
 const DECISION_LABEL: Record<KbAdviceReviewDecision, string> = {
-  adopted: '采纳',
-  adopted_with_edits: '修改后采纳',
-  rejected: '驳回',
+  adopted: '已记录采纳',
+  adopted_with_edits: '修改后已记录',
+  rejected: '已驳回',
 }
 
 const DECISION_TAG_COLOR: Record<KbAdviceReviewDecision, string> = {
@@ -167,7 +167,7 @@ export function AiCaseAssistant({ ticket }: Props) {
       <Alert
         type="warning"
         showIcon
-        message="AI 仅提供办理建议，不得自动受理、驳回、修改状态、派发或发送正式回复。所有动作必须由工作人员确认。"
+        message="AI 只提供建议。采纳记录不会自动派发、填写办理结果或办结；真实业务操作必须在工单详情完成。"
         style={{ marginBottom: 16 }}
       />
 
@@ -319,23 +319,27 @@ export function AiCaseAssistant({ ticket }: Props) {
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
               <Space wrap>
-                <Button
-                  type="primary"
-                  icon={<CheckOutlined />}
-                  disabled={buttonsDisabled}
-                  loading={reviewMutation.isPending && pendingDecision === 'adopted'}
-                  onClick={() => reviewMutation.mutate('adopted')}
-                >
-                  采纳
-                </Button>
-                <Button
-                  icon={<EditOutlined />}
-                  disabled={buttonsDisabled}
-                  loading={reviewMutation.isPending && pendingDecision === 'adopted_with_edits'}
-                  onClick={() => openReviewModal('adopted_with_edits')}
-                >
-                  修改后采纳
-                </Button>
+                <Tooltip title="仅记录审核决策，不会自动修改工单字段或状态">
+                  <Button
+                    type="primary"
+                    icon={<CheckOutlined />}
+                    disabled={buttonsDisabled}
+                    loading={reviewMutation.isPending && pendingDecision === 'adopted'}
+                    onClick={() => reviewMutation.mutate('adopted')}
+                  >
+                    记录为已采纳
+                  </Button>
+                </Tooltip>
+                <Tooltip title="仅记录审核决策与修改摘要，不会自动改工单字段、派发或办结">
+                  <Button
+                    icon={<EditOutlined />}
+                    disabled={buttonsDisabled}
+                    loading={reviewMutation.isPending && pendingDecision === 'adopted_with_edits'}
+                    onClick={() => openReviewModal('adopted_with_edits')}
+                  >
+                    记录修改后采纳
+                  </Button>
+                </Tooltip>
                 <Button
                   danger
                   icon={<CloseOutlined />}
@@ -396,7 +400,7 @@ export function AiCaseAssistant({ ticket }: Props) {
           </div>
 
           <Modal
-            title={pendingDecision === 'adopted_with_edits' ? '修改后采纳' : '驳回原因'}
+            title={pendingDecision === 'adopted_with_edits' ? '记录修改后采纳' : '驳回原因'}
             open={reviewModalOpen}
             onOk={submitReview}
             onCancel={closeReviewModal}
@@ -407,7 +411,7 @@ export function AiCaseAssistant({ ticket }: Props) {
           >
             <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
               {pendingDecision === 'adopted_with_edits'
-                ? '请填写修改内容摘要（必填，最多 1000 字符）。提交后仅记录审计轨迹，不修改工单状态。'
+                ? '请填写修改内容摘要（必填，最多 1000 字符）。仅记录审核决策，不会自动修改工单字段、派发或办结。'
                 : '请填写驳回原因（可选，最多 1000 字符）。提交后仅记录审计轨迹，不修改工单状态。'}
             </Typography.Paragraph>
             <Input.TextArea

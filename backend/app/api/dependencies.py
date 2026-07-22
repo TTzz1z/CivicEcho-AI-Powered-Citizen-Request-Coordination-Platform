@@ -1,6 +1,6 @@
 import hmac
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -49,3 +49,35 @@ def get_user_principal(principal: Principal = Depends(get_current_principal)) ->
     if principal.kind != "user":
         raise AuthenticationError()
     return principal
+
+
+def require_metrics_access(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+) -> None:
+    """Block anonymous access to operational /metrics.
+
+    Accepts MONITORING_TOKEN (Bearer or X-Monitoring-Token) or an admin JWT.
+    Health checks must continue to use /health/* — never /metrics.
+    """
+    settings = get_settings()
+    monitoring = (settings.monitoring_token or "").strip()
+    header_token = (request.headers.get("x-monitoring-token") or "").strip()
+    if monitoring:
+        if header_token and hmac.compare_digest(header_token, monitoring):
+            return
+        if (
+            credentials
+            and credentials.scheme.lower() == "bearer"
+            and hmac.compare_digest(credentials.credentials, monitoring)
+        ):
+            return
+    if credentials and credentials.scheme.lower() == "bearer":
+        try:
+            principal = get_current_principal(credentials, db)
+            if principal.kind == "user" and principal.role == "admin":
+                return
+        except AuthenticationError:
+            pass
+    raise AuthenticationError("metrics 需要监控令牌或管理员认证")

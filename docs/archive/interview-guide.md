@@ -96,7 +96,7 @@
 ## 可主动展示的证据
 
 - `ENGINEERING.md` / `PRODUCT.md`：架构、调用链、权限和状态机。
-- `docs/final-test-report.md`：实际回归数字与验收结论。
+- `docs/archive/final-test-report.md`：历史回归稿（过期）；现行见 `docs/TESTING.md`。
 - `scripts/check-demo.ps1`：可运行的一键检查，不是静态 PPT。
 - `frontend/e2e/workflows.spec.ts`：真实四角色闭环、降级和并发冲突。
 - `backend/app/services/ticket_service.py` 与 `authorization.py`：核心业务规则。

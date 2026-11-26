@@ -10,7 +10,6 @@ __pycache__/
 .cache/
 .config/
 .keras/
-.rasa/
 .coverage
 htmlcov/
 
@@ -28,13 +27,8 @@ Thumbs.db
 .pytype/
 .idea/
 
-# ----- Rasa generated artifacts -----
-# Keep only the sealed release model explicitly whitelisted below.
-models/*
-!models/tingting-v1.3.0.tar.gz
-results/
+# ----- Local database files -----
 *.db-*
-rasa.db*
 *.db
 
 # ----- Backend / frontend generated artifacts -----
@@ -71,6 +65,11 @@ temp/
 # ----- AI agent tool caches -----
 .agents/
 .codex/
+.qoder/
+.workbuddy/
+.claude/
+.cursor/
+docs/design-handoff/
 
 # ----- Legacy demo checkout/build -----
 chatroom/

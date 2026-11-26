@@ -1,9 +1,11 @@
 import { lazy, Suspense } from 'react'
 import { Route, Routes } from 'react-router-dom'
-import { WorkspaceLayout } from '../layouts/WorkspaceLayout'
-import { ForbiddenPage, NotFoundPage } from '../pages/ResultPages'
 import { HomeRedirect, RequireAuth, RequireRole } from './guards'
 import { PageLoading } from '../components/PageState'
+
+const WorkspaceLayout=lazy(()=>import('../layouts/WorkspaceLayout').then(m=>({default:m.WorkspaceLayout})))
+const ForbiddenPage=lazy(()=>import('../pages/ResultPages').then(m=>({default:m.ForbiddenPage})))
+const NotFoundPage=lazy(()=>import('../pages/ResultPages').then(m=>({default:m.NotFoundPage})))
 
 const LandingPage=lazy(()=>import('../pages/LandingPage').then(m=>({default:m.LandingPage})))
 const LoginPage=lazy(()=>import('../pages/LoginPage').then(m=>({default:m.LoginPage})))
@@ -28,7 +30,8 @@ const loading=<PageLoading/>
 
 export function AppRoutes(){return <Suspense fallback={loading}><Routes>
   <Route path="/welcome" element={<LandingPage/>}/><Route path="/login" element={<LoginPage/>}/><Route path="/auth/oidc/callback" element={<OidcCallbackPage/>}/><Route path="/chat" element={<div className="public-chat-page"><ChatPage/></div>}/><Route path="/forbidden" element={<ForbiddenPage/>}/>
-  <Route element={<RequireAuth/>}><Route element={<WorkspaceLayout/>}><Route path="/" element={<HomeRedirect/>}/>
+  <Route path="/" element={<HomeRedirect/>}/>
+  <Route element={<RequireAuth/>}><Route element={<WorkspaceLayout/>}>
     <Route element={<RequireRole roles={['citizen']}/>}><Route path="/citizen/chat" element={<ChatPage/>}/><Route path="/citizen/tickets" element={<TicketsPage/>}/><Route path="/citizen/tickets/:ticketId" element={<TicketDetailPage/>}/><Route path="/citizen/policy" element={<CitizenPolicyPage/>}/><Route path="/citizen/intelligence" element={<IntelligencePage/>}/><Route path="/citizen/notifications" element={<NotificationsPage/>}/><Route path="/citizen/aftercare" element={<AftercarePage/>}/></Route>
     <Route element={<RequireRole roles={['agent']}/>}><Route path="/agent/tickets" element={<TicketsPage/>}/><Route path="/agent/tickets/:ticketId" element={<TicketDetailPage/>}/><Route path="/agent/policy" element={<AgentPolicyPage/>}/><Route path="/agent/intelligence" element={<IntelligencePage/>}/><Route path="/agent/notifications" element={<NotificationsPage/>}/><Route path="/agent/aftercare" element={<AftercarePage/>}/></Route>
     <Route element={<RequireRole roles={['department_staff', 'admin']}/>}><Route path="/department/tickets" element={<TicketsPage/>}/><Route path="/department/tickets/:ticketId" element={<TicketDetailPage/>}/><Route path="/department/kb" element={<DepartmentKbPage/>}/><Route path="/department/intelligence" element={<IntelligencePage/>}/><Route path="/department/notifications" element={<NotificationsPage/>}/><Route path="/department/aftercare" element={<AftercarePage/>}/></Route>

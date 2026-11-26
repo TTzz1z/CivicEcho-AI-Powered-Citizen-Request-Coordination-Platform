@@ -1,12 +1,15 @@
 FROM python:3.11-slim@sha256:90edbeb8e4efce8dfe102f24c5ea1c8a1d770ff3d99c9c565d89ec97145f0fea
 WORKDIR /app
 COPY backend/requirements.txt backend/requirements.lock.txt ./
-RUN python -m pip install --no-cache-dir --upgrade pip==26.1.2 \
+RUN python -m pip install --no-cache-dir --upgrade pip==26.3 setuptools==84.2.1 \
     && pip install --no-cache-dir -r requirements.lock.txt
 # Bust COPY cache on CI so production Settings changes are never served from stale layers.
 ARG CI_CACHEBUST=1
 RUN printf '%s\n' "$CI_CACHEBUST" > /tmp/ci_cachebust
 COPY backend .
-RUN chmod +x /app/entrypoint.sh
+RUN useradd --uid 10001 --create-home --no-log-init civicecho \
+    && chmod +x /app/entrypoint.sh
+ENV PYTHONDONTWRITEBYTECODE=1
+USER 10001
 EXPOSE 8000
 CMD ["/app/entrypoint.sh"]

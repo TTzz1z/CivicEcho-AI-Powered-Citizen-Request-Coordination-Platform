@@ -12,7 +12,9 @@ import {
   reviewKbTicketAdvice,
 } from '../api/kb'
 import type { KbAdviceReviewDecision, KbAdviceReviewRecord } from '../api/kb'
-import type { KbCitation, KbTicketAdvice, TicketDetail } from '../types'
+import type { KbTicketAdvice, TicketDetail } from '../types'
+import { AiSourceStatus } from './AiSourceStatus'
+import { PolicyCitations } from './PolicyCitations'
 
 interface Props {
   ticket: TicketDetail
@@ -141,12 +143,13 @@ export function AiCaseAssistant({ ticket }: Props) {
 
   return (
     <Card
-      className="surface"
+      className="surface ce-ai-shimmer"
       title={<Space><RobotOutlined />AI 办件助手</Space>}
       extra={
         <Space>
           <Tag color="orange">仅辅助参考</Tag>
-          {advice?.provider && <Tag color="blue">{advice.provider}</Tag>}
+          {advice && <AiSourceStatus provider={advice.provider} model={advice.model}
+            degraded={advice.degraded} reason={advice.degrade_reason} noEvidence={advice.no_evidence} latencyMs={advice.latency_ms} />}
           {latestReview && (
             <Badge
               status={DECISION_BADGE_STATUS[latestReview.decision]}
@@ -270,7 +273,7 @@ export function AiCaseAssistant({ ticket }: Props) {
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <Typography.Paragraph
                       copyable={{ icon: [<CopyOutlined key="c" />, '复制草稿'] }}
-                      style={{ whiteSpace: 'pre-wrap', marginBottom: 0, background: 'rgba(22,124,114,0.05)', padding: 12, borderRadius: 6 }}
+                      style={{ whiteSpace: 'pre-wrap', marginBottom: 0, background: '#fafafb', border: '1px solid var(--ce-line)', padding: 12, borderRadius: 8 }}
                     >
                       {advice.reply_draft}
                     </Typography.Paragraph>
@@ -286,22 +289,7 @@ export function AiCaseAssistant({ ticket }: Props) {
                 children: advice.no_evidence || !advice.citations.length ? (
                   <Empty description={advice.no_evidence ? '无证据，不展示引用来源' : '无引用（基于规则生成）'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
                 ) : (
-                  <Collapse
-                    size="small"
-                    items={advice.citations.map(c => ({
-                      key: c.index,
-                      label: (
-                        <Space wrap>
-                          <Tag color="blue">来源{c.index}</Tag>
-                          <Typography.Text strong>{c.title}</Typography.Text>
-                          {c.doc_number && <Typography.Text type="secondary">{c.doc_number}</Typography.Text>}
-                          {(c.issuing_authority || c.department) && <Tag>{c.issuing_authority || c.department}</Tag>}
-                          {c.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag>}
-                        </Space>
-                      ),
-                      children: <CitationDetail citation={c} />,
-                    }))}
-                  />
+                  <PolicyCitations citations={advice.citations} noEvidence={advice.no_evidence} canReadDocument />
                 ),
               },
             ]}
@@ -452,46 +440,4 @@ function snapshotSuggestionVersion(snapshot: Record<string, unknown> | null | un
   const v = snapshot.suggestion_version
   if (typeof v === 'string' || typeof v === 'number') return v
   return null
-}
-
-function CitationDetail({ citation }: { citation: KbCitation }) {
-  const authority = citation.issuing_authority || citation.department
-  return (
-    <div>
-      {citation.excerpt && (
-        <Typography.Paragraph
-          style={{
-            background: 'rgba(22,124,114,0.05)',
-            padding: 12,
-            borderRadius: 6,
-            whiteSpace: 'pre-wrap',
-            marginBottom: 12,
-          }}
-        >
-          {citation.excerpt}
-        </Typography.Paragraph>
-      )}
-      <Space wrap>
-        {authority && <Tag>发布单位：{authority}</Tag>}
-        {citation.doc_number && <Tag>文号：{citation.doc_number}</Tag>}
-        {citation.published_at && <Tag>发布：{citation.published_at.slice(0, 10)}</Tag>}
-        {citation.effective_at && <Tag>生效：{citation.effective_at.slice(0, 10)}</Tag>}
-        {citation.expires_at && (
-          <Tag color={citation.is_expired ? 'red' : 'default'}>
-            失效：{citation.expires_at.slice(0, 10)}
-          </Tag>
-        )}
-        {citation.kb_type && <Tag>{kbTypeLabel(citation.kb_type)}</Tag>}
-        {citation.version && <Tag>v{citation.version}</Tag>}
-      </Space>
-    </div>
-  )
-}
-
-function kbTypeLabel(t: string) {
-  const map: Record<string, string> = {
-    policy: '公开政策', guide: '办事指南', faq: '常见问题',
-    internal: '内部制度', procedure: '办理流程', case: '历史案例',
-  }
-  return map[t] || t
 }

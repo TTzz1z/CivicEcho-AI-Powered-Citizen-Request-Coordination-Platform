@@ -1,12 +1,14 @@
-import { useState } from 'react'
-import { Alert, Button, Card, Collapse, Empty, Form, Input, Select, Space, Spin, Tag, Typography, message } from 'antd'
-import { BulbOutlined, CopyOutlined, DislikeOutlined, LikeOutlined, QuestionCircleOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, App, Button, Card, Divider, Form, Input, Select, Space, Tag, Typography } from 'antd'
+import { BulbOutlined, CopyOutlined, DislikeOutlined, LikeOutlined, QuestionCircleOutlined, ReloadOutlined, StopOutlined, WarningOutlined } from '@ant-design/icons'
 import { useMutation } from '@tanstack/react-query'
 import { useAuth } from '../auth/AuthContext'
 import { ApiError } from '../api/client'
-import { ragQuery, submitKbFeedback } from '../api/kb'
-import type { KbCitation, KbRagAnswer, KbRagQuery, Role } from '../types'
+import { streamRagQuery, submitKbFeedback } from '../api/kb'
+import type { KbFeedbackPayload, KbRagAnswer, KbRagQuery, Role } from '../types'
 import { PageHeader } from './PageHeader'
+import { filterDisplayCitations, PolicyCitations } from './PolicyCitations'
+import { WorkspaceError, WorkspaceLoading } from './WorkspaceState'
 
 const { TextArea } = Input
 
@@ -25,6 +27,10 @@ const audienceOptions = [
 
 const regionOptions = ['本市', '本区', '本街道', '本社区'].map(v => ({ label: v, value: v }))
 
+type SearchAnswer = { data: KbRagAnswer; question: string; stopped?: boolean }
+type FeedbackType = KbFeedbackPayload['feedback_type']
+type StreamPhase = 'idle' | 'retrieving' | 'streaming'
+
 interface Props {
   /** 角色专属标题/描述 */
   title?: string
@@ -41,47 +47,148 @@ interface Props {
  */
 export function KbRagPanel({ title, eyebrow, description, enableFilters = false }: Props) {
   const { user } = useAuth()
+  const { message } = App.useApp()
   const [form] = Form.useForm<KbRagQuery>()
-  const [result, setResult] = useState<KbRagAnswer | null>(null)
-  const [feedbackSent, setFeedbackSent] = useState(false)
+  const [phase, setPhase] = useState<StreamPhase>('idle')
+  const [result, setResult] = useState<SearchAnswer | null>(null)
+  const [streamingResult, setStreamingResult] = useState<SearchAnswer | null>(null)
+  const [streamError, setStreamError] = useState<unknown>(null)
+  const [rated, setRated] = useState<SearchAnswer | null>(null)
+  const activeRequest = useRef<AbortController | null>(null)
+  const streamingRef = useRef<SearchAnswer | null>(null)
 
-  const query = useMutation({
-    mutationFn: (payload: KbRagQuery) => ragQuery(payload),
-    onSuccess: (data) => {
-      setResult(data)
-      setFeedbackSent(false)
-    },
-    onError: e => message.error(e instanceof ApiError ? e.message : '检索失败，请稍后重试'),
-  })
+  useEffect(() => () => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+  }, [])
 
   const feedback = useMutation({
-    mutationFn: async (type: 'helpful' | 'inaccurate' | 'outdated' | 'no_answer') => {
-      if (!result) return
-      await submitKbFeedback({
-        query_text: form.getFieldValue('query') || '',
-        answer_text: result.answer,
-        document_ids: result.citations.map(c => c.doc_id),
-        feedback_type: type,
-        comment: '',
-        route: roleToRoute(user?.role),
-      })
-    },
-    onSuccess: () => { setFeedbackSent(true); message.success('反馈已记录，感谢您的支持') },
+    mutationFn: ({ answer, type }: { answer: SearchAnswer; type: FeedbackType }) => submitKbFeedback({
+      query_text: answer.question,
+      answer_text: answer.data.answer,
+      document_ids: filterDisplayCitations(answer.data.citations, answer.data.no_evidence).map(c => c.doc_id),
+      feedback_type: type,
+      comment: '',
+      route: roleToRoute(user?.role),
+    }),
+    onSuccess: (_, submission) => { setRated(submission.answer); message.success('反馈已记录，感谢您的支持') },
     onError: e => message.error(e instanceof ApiError ? e.message : '反馈提交失败'),
   })
 
-  const handleSubmit = (values: KbRagQuery) => {
-    if (!values.query?.trim()) {
+  const runStreamQuery = async (values: KbRagQuery) => {
+    const question = values.query?.trim()
+    if (!question) {
       message.warning('请输入您要咨询的问题')
       return
     }
-    query.mutate(values)
+    if (activeRequest.current) return
+
+    const controller = new AbortController()
+    activeRequest.current = controller
+    streamingRef.current = null
+    setStreamingResult(null)
+    setStreamError(null)
+    setPhase('retrieving')
+
+    const isCurrent = () => activeRequest.current === controller && !controller.signal.aborted
+
+    try {
+      let receivedDone = false
+      const done = await streamRagQuery(
+        { ...values, query: question },
+        {
+          onMeta: meta => {
+            if (!isCurrent()) return
+            const initial: SearchAnswer = {
+              question,
+              data: {
+                answer: streamingRef.current?.data.answer ?? '',
+                citations: meta.citations,
+                no_evidence: meta.no_evidence,
+                retrieval_count: meta.retrieval_count,
+                latency_ms: 0,
+                generated_at: new Date().toISOString(),
+              },
+            }
+            streamingRef.current = initial
+            setStreamingResult(initial)
+            setPhase('streaming')
+          },
+          onDelta: chunk => {
+            if (!isCurrent()) return
+            const base = streamingRef.current ?? {
+              question,
+              data: {
+                answer: '',
+                citations: [],
+                no_evidence: false,
+                retrieval_count: 0,
+                latency_ms: 0,
+                generated_at: new Date().toISOString(),
+              },
+            }
+            const updated: SearchAnswer = {
+              question: base.question,
+              data: {
+                ...base.data,
+                answer: `${base.data.answer}${chunk}`,
+              },
+            }
+            streamingRef.current = updated
+            setStreamingResult(updated)
+            setPhase('streaming')
+          },
+          onDone: payload => {
+            if (!isCurrent()) return
+            receivedDone = true
+            streamingRef.current = null
+            setStreamingResult(null)
+            setResult({ data: payload, question })
+            setPhase('idle')
+          },
+        },
+        controller.signal,
+      )
+      if (!receivedDone && isCurrent() && done) {
+        streamingRef.current = null
+        setStreamingResult(null)
+        setResult({ data: done, question })
+        setPhase('idle')
+      }
+    } catch (err) {
+      if ((err instanceof DOMException && err.name === 'AbortError') || controller.signal.aborted) {
+        return
+      }
+      if (isCurrent()) {
+        streamingRef.current = null
+        setStreamingResult(null)
+        setResult(null)
+        setStreamError(err)
+        setPhase('idle')
+      }
+    } finally {
+      if (activeRequest.current === controller) {
+        activeRequest.current = null
+      }
+    }
   }
 
-  const handleRegenerate = () => {
-    const v = form.getFieldsValue()
-    if (v.query?.trim()) query.mutate(v)
+  const stopGeneration = () => {
+    const controller = activeRequest.current
+    if (!controller) return
+    const partial = streamingRef.current
+    activeRequest.current = null
+    controller.abort()
+    streamingRef.current = null
+    setStreamingResult(null)
+    setStreamError(null)
+    setPhase('idle')
+    if (partial && partial.data.answer.trim()) {
+      setResult({ data: partial.data, question: partial.question, stopped: true })
+    }
   }
+
+  const isBusy = phase !== 'idle'
 
   return (
     <>
@@ -93,13 +200,13 @@ export function KbRagPanel({ title, eyebrow, description, enableFilters = false 
       <Card className="surface" style={{ marginBottom: 20 }}>
         <Alert
           showIcon
-          icon={<WarningOutlined />}
+          icon={<WarningOutlined aria-hidden />}
           type="info"
-          message="使用须知"
+          title="使用须知"
           description="本系统只依据已发布的公开政策、办事指南、常见问题等回答。如未检索到依据，建议拨打 12345 热线或前往窗口咨询。"
           style={{ marginBottom: 16 }}
         />
-        <Form form={form} layout="vertical" onFinish={handleSubmit}>
+        <Form form={form} layout="vertical" onFinish={values => void runStreamQuery(values)}>
           <Form.Item
             name="query"
             label="您要咨询的政策问题"
@@ -107,7 +214,9 @@ export function KbRagPanel({ title, eyebrow, description, enableFilters = false 
           >
             <TextArea
               rows={3}
-              placeholder="例如：本市低保申请需要哪些材料？办理流程是什么？"
+              maxLength={2000}
+              showCount
+              placeholder="请输入政策主题或您需要了解的办理事项"
               aria-label="政策咨询问题"
             />
           </Form.Item>
@@ -125,12 +234,17 @@ export function KbRagPanel({ title, eyebrow, description, enableFilters = false 
             </Space>
           )}
           <Form.Item style={{ marginBottom: 0 }}>
-            <Space>
-              <Button type="primary" htmlType="submit" loading={query.isPending} icon={<BulbOutlined />}>
+            <Space wrap>
+              <Button type="primary" htmlType="submit" loading={isBusy} icon={<BulbOutlined aria-hidden />}>
                 查询政策
               </Button>
-              {result && (
-                <Button onClick={handleRegenerate} loading={query.isPending} icon={<ReloadOutlined />}>
+              {isBusy && (
+                <Button danger icon={<StopOutlined aria-hidden />} onClick={stopGeneration}>
+                  停止生成
+                </Button>
+              )}
+              {result && !isBusy && (
+                <Button onClick={() => form.submit()} icon={<ReloadOutlined aria-hidden />}>
                   重新生成
                 </Button>
               )}
@@ -139,21 +253,35 @@ export function KbRagPanel({ title, eyebrow, description, enableFilters = false 
         </Form>
       </Card>
 
-      {query.isPending && (
-        <Card className="surface" style={{ textAlign: 'center', padding: 32 }}>
-          <Spin size="large" />
-          <div style={{ marginTop: 12 }}>
-            <Typography.Text type="secondary">正在检索政策库并生成回答…</Typography.Text>
-          </div>
+      {phase === 'retrieving' && (
+        <Card className="surface" aria-busy="true">
+          <WorkspaceLoading label="正在检索政策资料并生成回答" />
         </Card>
       )}
+      {streamError !== null && <WorkspaceError error={streamError} fallback="检索失败，请稍后重试。" retry={() => form.submit()} />}
 
-      {result && !query.isPending && (
+      {phase === 'streaming' && streamingResult && (
         <KbRagResultCard
-          result={result}
+          result={streamingResult.data}
+          question={streamingResult.question}
           role={user?.role}
-          feedbackSent={feedbackSent}
-          onFeedback={(t) => feedback.mutate(t)}
+          streaming
+          showFeedback={false}
+          feedbackSent={false}
+          onFeedback={() => {}}
+          feedbackLoading={false}
+        />
+      )}
+
+      {result && streamError === null && phase === 'idle' && (
+        <KbRagResultCard
+          result={result.data}
+          question={result.question}
+          role={user?.role}
+          stopped={result.stopped}
+          showFeedback={!result.stopped}
+          feedbackSent={rated === result}
+          onFeedback={(type) => feedback.mutate({ answer: result, type })}
           feedbackLoading={feedback.isPending}
         />
       )}
@@ -172,99 +300,79 @@ function roleToRoute(role?: Role) {
 }
 
 function KbRagResultCard({
-  result, role, feedbackSent, onFeedback, feedbackLoading,
+  result, question, role, streaming = false, stopped = false, showFeedback = true, feedbackSent, onFeedback, feedbackLoading,
 }: {
   result: KbRagAnswer
+  question: string
   role?: Role
+  streaming?: boolean
+  stopped?: boolean
+  showFeedback?: boolean
   feedbackSent: boolean
-  onFeedback: (t: 'helpful' | 'inaccurate' | 'outdated' | 'no_answer') => void
+  onFeedback: (t: FeedbackType) => void
   feedbackLoading: boolean
 }) {
+  const sources = filterDisplayCitations(result.citations, result.no_evidence)
   return (
     <Card
       className="surface"
       title={
-        <Space>
+        <Space wrap>
           <Typography.Text strong>政策咨询结果</Typography.Text>
+          {streaming && <Tag color="processing">正在生成…</Tag>}
+          {stopped && <Tag color="default">已停止生成</Tag>}
           {result.no_evidence ? (
             <Tag color="orange">未检索到依据</Tag>
           ) : (
-            <Tag color="green">检索到 {result.retrieval_count} 条来源</Tag>
+            <Tag color={sources.length ? 'green' : 'default'}>{sources.length ? `引用 ${sources.length} 条资料` : '无可展示引用'}</Tag>
           )}
           {role && <Tag>{roleLabels[role]}视角</Tag>}
-          {result.provider && <Tag color="blue">{result.provider}</Tag>}
+          {!streaming && (result.provider === 'rules' || result.degraded
+            ? <Tag color="gold">规则生成</Tag>
+            : result.provider && <Tag color="blue">模型来源：{result.model || result.provider}</Tag>)}
+          {!streaming && !stopped && <Typography.Text type="secondary" style={{ fontSize: 12 }}>耗时 {result.latency_ms} ms</Typography.Text>}
         </Space>
       }
-      extra={
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          耗时 {result.latency_ms} ms
-        </Typography.Text>
-      }
     >
+      <Typography.Paragraph type="secondary" className="policy-result-text">问题：{question}</Typography.Paragraph>
       {result.no_evidence ? (
         <Alert
           type="warning"
           showIcon
-          icon={<QuestionCircleOutlined />}
-          message="未检索到有效依据"
-          description={result.answer}
+          icon={<QuestionCircleOutlined aria-hidden />}
+          title="未检索到有效依据"
+          description={result.answer || (streaming ? '正在生成引导说明…' : '')}
         />
       ) : (
         <>
           <Typography.Paragraph
-            copyable={{ icon: [<CopyOutlined key="c" />, '复制回答'] }}
-            style={{ whiteSpace: 'pre-wrap', marginBottom: 16 }}
+            copyable={!streaming && result.answer ? { icon: [<CopyOutlined key="c" />, '复制回答'] } : false}
+            className="policy-result-text"
           >
             {result.answer}
+            {streaming && <span className="ce-streaming-cursor" aria-hidden="true" />}
           </Typography.Paragraph>
 
+          <PolicyCitations citations={sources} canReadDocument={Boolean(role)} />
+        </>
+      )}
+
+      {showFeedback && (
+        <>
           <Divider />
 
-          <Typography.Title level={5}>引用来源</Typography.Title>
-          {result.citations.length === 0 ? (
-            <Empty description="无引用" />
-          ) : (
-            <Collapse
-              size="small"
-              items={result.citations.map(c => ({
-                key: c.index,
-                label: (
-                  <Space wrap>
-                    <Tag color="blue">来源{c.index}</Tag>
-                    <Typography.Text strong>{c.title}</Typography.Text>
-                    {c.doc_number && <Typography.Text type="secondary">{c.doc_number}</Typography.Text>}
-                    {(c.issuing_authority || c.department) && <Tag>{c.issuing_authority || c.department}</Tag>}
-                    {c.is_expired ? (
-                      <Tag color="red">已失效</Tag>
-                    ) : (
-                      <Tag color="green">有效</Tag>
-                    )}
-                    {typeof c.score === 'number' && (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        相关度 {Math.round(c.score * 100) / 100}
-                      </Typography.Text>
-                    )}
-                  </Space>
-                ),
-                children: <CitationDetail citation={c} />,
-              }))}
-            />
-          )}
-
-          <Divider />
-
-          <Space>
+          <Space wrap>
             <Typography.Text type="secondary">本次回答是否有帮助？</Typography.Text>
             <Button
               size="small"
-              icon={<LikeOutlined />}
+              icon={<LikeOutlined aria-hidden />}
               disabled={feedbackSent}
               loading={feedbackLoading}
               onClick={() => onFeedback('helpful')}
             >有帮助</Button>
             <Button
               size="small"
-              icon={<DislikeOutlined />}
+              icon={<DislikeOutlined aria-hidden />}
               disabled={feedbackSent}
               loading={feedbackLoading}
               onClick={() => onFeedback('inaccurate')}
@@ -287,48 +395,4 @@ function KbRagResultCard({
       )}
     </Card>
   )
-}
-
-function CitationDetail({ citation }: { citation: KbCitation }) {
-  const authority = citation.issuing_authority || citation.department
-  return (
-    <div>
-      {citation.excerpt && (
-        <Typography.Paragraph
-          style={{
-            background: 'rgba(22,124,114,0.05)',
-            padding: 12,
-            borderRadius: 6,
-            whiteSpace: 'pre-wrap',
-            marginBottom: 12,
-          }}
-        >
-          {citation.excerpt}
-        </Typography.Paragraph>
-      )}
-      <Space wrap>
-        {authority && <Tag>发布单位：{authority}</Tag>}
-        {citation.doc_number && <Tag>文号：{citation.doc_number}</Tag>}
-        {citation.published_at && <Tag>发布：{citation.published_at.slice(0, 10)}</Tag>}
-        {citation.effective_at && <Tag>生效：{citation.effective_at.slice(0, 10)}</Tag>}
-        {citation.expires_at && <Tag color={citation.is_expired ? 'red' : 'default'}>
-          失效：{citation.expires_at.slice(0, 10)}
-        </Tag>}
-        {citation.kb_type && <Tag>{kbTypeLabel(citation.kb_type)}</Tag>}
-        {citation.version && <Tag>v{citation.version}</Tag>}
-      </Space>
-    </div>
-  )
-}
-
-function Divider() {
-  return <div style={{ borderTop: '1px solid #f0f0f0', margin: '16px 0' }} />
-}
-
-function kbTypeLabel(t: string) {
-  const map: Record<string, string> = {
-    policy: '公开政策', guide: '办事指南', faq: '常见问题',
-    internal: '内部制度', procedure: '办理流程', case: '历史案例',
-  }
-  return map[t] || t
 }

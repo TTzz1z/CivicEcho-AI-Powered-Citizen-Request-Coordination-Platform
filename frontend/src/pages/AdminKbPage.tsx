@@ -1,12 +1,11 @@
 import { useState } from 'react'
 import {
-  Alert, Badge, Button, Card, Col, Descriptions, Empty, Form, Input, InputNumber,
-  Modal, Popconfirm, Progress, Row, Select, Space, Spin, Statistic, Table, Tabs,
+  Alert, Button, Card, Col, Descriptions, Empty, Form, Input,
+  Modal, Progress, Row, Select, Space, Statistic, Table, Tabs,
   Tag, Typography, message,
 } from 'antd'
 import {
-  AlertOutlined, AuditOutlined, BulbOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, ExperimentOutlined, PlayCircleOutlined,
+  AlertOutlined, AuditOutlined, BulbOutlined, ExperimentOutlined, PlayCircleOutlined,
   ThunderboltOutlined, ToolOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -17,25 +16,16 @@ import {
   runKbEval,
 } from '../api/kb'
 import type {
-  KbDocStatus, KbDocument, KbEvalCase, KbEvalCasePayload, KbEvalRunResult,
-  KbFeedback, KbFeedbackType, KbNoAnswer, KbNoAnswerStatus, KbRagAnswer,
+  KbDocument, KbEvalCasePayload, KbEvalRunResult,
+  KbFeedbackType, KbNoAnswer, KbNoAnswerStatus, KbRagAnswer,
   KbRetrievalResult,
 } from '../types'
+import { AiSourceStatus } from '../components/AiSourceStatus'
 import { ErrorState } from '../components/ErrorState'
+import { WorkspaceTableRegion } from '../components/WorkspaceTableRegion'
 import { PageHeader } from '../components/PageHeader'
-import { KbRagPanel } from '../components/KbRagPanel'
 
 const { TextArea } = Input
-
-const STATUS_LABELS: Record<KbDocStatus, { label: string; color: string }> = {
-  DRAFT: { label: '草稿', color: 'default' },
-  REVIEWING: { label: '待审核', color: 'processing' },
-  PUBLISHED: { label: '已发布', color: 'success' },
-  REJECTED: { label: '已驳回', color: 'error' },
-  WITHDRAWN: { label: '已下线', color: 'warning' },
-  EXPIRED: { label: '已失效', color: 'default' },
-  PARSE_FAILED: { label: '解析失败', color: 'error' },
-}
 
 export function AdminKbPage() {
   return (
@@ -91,32 +81,35 @@ function ReviewTab() {
       {list.isError ? (
         <ErrorState error={list.error} retry={() => list.refetch()} />
       ) : (
-        <Table
-          rowKey="id"
-          size="small"
-          loading={list.isLoading}
-          dataSource={list.data?.items}
-          pagination={false}
-          columns={[
-            { title: 'ID', dataIndex: 'id', width: 70 },
-            { title: '标题', dataIndex: 'title', ellipsis: true },
-            { title: '文号', dataIndex: 'doc_number', width: 140, ellipsis: true },
-            { title: '类型', dataIndex: 'kb_type', width: 100,
-              render: (t: string) => <Tag>{kbTypeLabel(t)}</Tag> },
-            { title: '公开范围', dataIndex: 'visibility', width: 100,
-              render: (v: string) => <Tag>{v}</Tag> },
-            { title: '版本', dataIndex: 'version', width: 60 },
-            { title: '部门', dataIndex: 'department_name', width: 120, ellipsis: true },
-            { title: '提交时间', dataIndex: 'updated_at', width: 110,
-              render: (v?: string | null) => v ? v.slice(0, 10) : '—' },
-            { title: '操作', key: 'actions', width: 200, fixed: 'right' as const,
-              render: (_: unknown, r: KbDocument) => (
-                <Space>
-                  <ReviewAction docId={r.id} onReview={(decision, comment) => review.mutate({ docId: r.id, decision, comment })} loading={review.isPending} />
-                </Space>
-              ) },
-          ]}
-        />
+        <WorkspaceTableRegion label="待审核文档">
+          <Table
+            scroll={{ x: 965 }}
+            rowKey="id"
+            size="small"
+            loading={list.isLoading}
+            dataSource={list.data?.items}
+            pagination={false}
+            columns={[
+              { title: 'ID', dataIndex: 'id', width: 70 },
+              { title: '标题', dataIndex: 'title', ellipsis: true },
+              { title: '文号', dataIndex: 'doc_number', width: 140, ellipsis: true },
+              { title: '类型', dataIndex: 'kb_type', width: 100,
+                render: (t: string) => <Tag>{kbTypeLabel(t)}</Tag> },
+              { title: '公开范围', dataIndex: 'visibility', width: 100,
+                render: (v: string) => <Tag>{v}</Tag> },
+              { title: '版本', dataIndex: 'version', width: 60 },
+              { title: '部门', dataIndex: 'department_name', width: 120, ellipsis: true },
+              { title: '提交时间', dataIndex: 'updated_at', width: 110,
+                render: (v?: string | null) => v ? v.slice(0, 10) : '—' },
+              { title: '操作', key: 'actions', width: 200,
+                render: (_: unknown, r: KbDocument) => (
+                  <Space>
+                    <ReviewAction docId={r.id} onReview={(decision, comment) => review.mutate({ docId: r.id, decision, comment })} loading={review.isPending} />
+                  </Space>
+                ) },
+            ]}
+          />
+        </WorkspaceTableRegion>
       )}
     </Card>
   )
@@ -204,10 +197,20 @@ function TestbedTab() {
       {mode === 'answer' && result && (
         <Card className="surface" title={<Space><BulbOutlined />回答结果</Space>}
           extra={<Tag color={result.no_evidence ? 'orange' : 'green'}>{result.no_evidence ? '无依据' : `${result.retrieval_count} 条来源`}</Tag>}>
+          <div style={{ marginBottom: 12 }}>
+            <AiSourceStatus
+              provider={result.provider}
+              model={result.model}
+              degraded={result.degraded}
+              reason={result.degrade_reason}
+              noEvidence={result.no_evidence}
+              latencyMs={result.latency_ms}
+            />
+          </div>
           <Typography.Paragraph copyable style={{ whiteSpace: 'pre-wrap', marginBottom: 16 }}>
             {result.answer}
           </Typography.Paragraph>
-          <Descriptions size="small" column={4} bordered>
+          <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} bordered>
             <Descriptions.Item label="检索来源数">{result.retrieval_count}</Descriptions.Item>
             <Descriptions.Item label="耗时">{result.latency_ms} ms</Descriptions.Item>
             <Descriptions.Item label="Provider">{result.provider || '—'}</Descriptions.Item>
@@ -216,22 +219,25 @@ function TestbedTab() {
           {result.citations.length > 0 && (
             <>
               <Typography.Title level={5} style={{ marginTop: 16 }}>引用列表</Typography.Title>
-              <Table
-                size="small"
-                rowKey="index"
-                pagination={false}
-                dataSource={result.citations}
-                columns={[
-                  { title: '#', dataIndex: 'index', width: 50 },
-                  { title: '标题', dataIndex: 'title', ellipsis: true },
-                  { title: '文号', dataIndex: 'doc_number', width: 140, ellipsis: true },
-                  { title: '部门', dataIndex: 'department', width: 120 },
-                  { title: '状态', width: 80, render: (_: unknown, r: typeof result.citations[0]) =>
-                    r.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag> },
-                  { title: '相关度', dataIndex: 'score', width: 80,
-                    render: (s?: number) => s != null ? Math.round(s * 100) / 100 : '—' },
-                ]}
-              />
+              <WorkspaceTableRegion label="回答引用">
+                <Table
+                  scroll={{ x: 600 }}
+                  size="small"
+                  rowKey="index"
+                  pagination={false}
+                  dataSource={result.citations}
+                  columns={[
+                    { title: '#', dataIndex: 'index', width: 50 },
+                    { title: '标题', dataIndex: 'title', ellipsis: true },
+                    { title: '文号', dataIndex: 'doc_number', width: 140, ellipsis: true },
+                    { title: '部门', dataIndex: 'department', width: 120 },
+                    { title: '状态', width: 80, render: (_: unknown, r: typeof result.citations[0]) =>
+                      r.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag> },
+                    { title: '相关度', dataIndex: 'score', width: 80,
+                      render: (s?: number) => s != null ? Math.round(s * 100) / 100 : '—' },
+                  ]}
+                />
+              </WorkspaceTableRegion>
             </>
           )}
         </Card>
@@ -243,22 +249,25 @@ function TestbedTab() {
           {retrieveResult.chunks.length === 0 ? (
             <Empty description="未检索到切片" />
           ) : (
-            <Table
-              size="small"
-              rowKey="chunk_id"
-              pagination={false}
-              dataSource={retrieveResult.chunks}
-              columns={[
-                { title: '切片ID', dataIndex: 'chunk_id', width: 80 },
-                { title: '相关度', dataIndex: 'score', width: 100,
-                  render: (s: number) => <Progress percent={Math.round(s * 100)} size="small" /> },
-                { title: '字符数', dataIndex: 'char_count', width: 80 },
-                { title: '状态', width: 80, render: (_: unknown, r: typeof retrieveResult.chunks[0]) =>
-                  r.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag> },
-                { title: '内容', dataIndex: 'content', ellipsis: true,
-                  render: (c: string) => <Typography.Text>{c.slice(0, 200)}…</Typography.Text> },
-              ]}
-            />
+            <WorkspaceTableRegion label="检索结果">
+              <Table
+                scroll={{ x: 700 }}
+                size="small"
+                rowKey="chunk_id"
+                pagination={false}
+                dataSource={retrieveResult.chunks}
+                columns={[
+                  { title: '切片ID', dataIndex: 'chunk_id', width: 80 },
+                  { title: '相关度', dataIndex: 'score', width: 100,
+                    render: (s: number) => <Progress percent={Math.round(s * 100)} size="small" /> },
+                  { title: '字符数', dataIndex: 'char_count', width: 80 },
+                  { title: '状态', width: 80, render: (_: unknown, r: typeof retrieveResult.chunks[0]) =>
+                    r.is_expired ? <Tag color="red">已失效</Tag> : <Tag color="green">有效</Tag> },
+                  { title: '内容', dataIndex: 'content', ellipsis: true,
+                    render: (c: string) => <Typography.Text>{c.slice(0, 200)}…</Typography.Text> },
+                ]}
+              />
+            </WorkspaceTableRegion>
           )}
         </Card>
       )}
@@ -271,6 +280,7 @@ function TestbedTab() {
 function EvalTab() {
   const qc = useQueryClient()
   const [scenario, setScenario] = useState<string | undefined>()
+  const [role, setRole] = useState('citizen')
   const [runResult, setRunResult] = useState<KbEvalRunResult | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
 
@@ -297,26 +307,22 @@ function EvalTab() {
           showIcon
           icon={<ExperimentOutlined />}
           message="RAG 评测中心"
-          description="基于预置评测集运行端到端测试，量化检索命中率、引用准确率、忠实度、失效政策拦截率、权限隔离率与平均延迟。"
+          description="使用预置用例检查检索、引用、事实覆盖和权限。无适用用例的指标显示为未评测。"
           style={{ marginBottom: 16 }}
         />
         <Space wrap>
           <Input placeholder="按场景过滤（可选）" allowClear style={{ width: 200 }}
             value={scenario} onChange={e => setScenario(e.target.value || undefined)} />
-          <Select defaultValue="citizen" style={{ width: 140 }} id="eval-role"
+          <Select value={role} style={{ width: 140 }} aria-label="评测角色"
             options={[
               { value: 'citizen', label: '市民视角' },
               { value: 'agent', label: '坐席视角' },
               { value: 'department_staff', label: '部门人员视角' },
               { value: 'admin', label: '管理员视角' },
             ]}
-            onChange={(v) => { /* store in DOM dataset */ const el = document.getElementById('eval-role') as any; if (el) el.dataset.role = v }} />
+            onChange={setRole} />
           <Button type="primary" icon={<PlayCircleOutlined />} loading={run.isPending}
-            onClick={() => {
-              const el = document.getElementById('eval-role') as any
-              const role = el?.dataset.role || 'citizen'
-              run.mutate(role)
-            }}>
+            onClick={() => run.mutate(role)}>
             运行评测
           </Button>
           <Button icon={<ToolOutlined />} onClick={() => setCreateOpen(true)}>新建用例</Button>
@@ -325,43 +331,49 @@ function EvalTab() {
 
       {runResult && (
         <Card className="surface" title="评测结果" style={{ marginBottom: 16 }}>
-          <Row gutter={16}>
-            <Col span={4}><Statistic title="用例总数" value={runResult.total} /></Col>
-            <Col span={4}><Statistic title="检索命中率" value={pct(runResult.metrics.retrieval_hit_rate)} suffix="%" /></Col>
-            <Col span={4}><Statistic title="引用准确率" value={pct(runResult.metrics.citation_correct_rate)} suffix="%" /></Col>
-            <Col span={4}><Statistic title="忠实度" value={pct(runResult.metrics.answer_faithful_rate)} suffix="%" /></Col>
-            <Col span={4}><Statistic title="失效拦截率" value={pct(runResult.metrics.expired_policy_blocked_rate)} suffix="%" /></Col>
-            <Col span={4}><Statistic title="权限隔离率" value={pct(runResult.metrics.permission_isolated_rate)} suffix="%" /></Col>
+          <Row gutter={[16, 12]}>
+            <Col xs={12} lg={6}><Statistic title="用例总数" value={runResult.total} /></Col>
+            <Col xs={12} lg={6}><Statistic title="检索命中率" value={pct(runResult.metrics.retrieval_hit_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="引用精度" value={pct(runResult.metrics.citation_precision)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="事实覆盖率" value={pct(runResult.metrics.fact_coverage_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="失效拦截率" value={pct(runResult.metrics.expired_policy_blocked_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="权限隔离率" value={pct(runResult.metrics.permission_isolated_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="规则摘录匹配率" value={pct(runResult.metrics.extractive_source_match_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="平均延迟" value={runResult.metrics.avg_latency_ms} suffix="ms" /></Col>
+            <Col xs={12} lg={6}><Statistic title="召回率 @K" value={pct(runResult.metrics.recall_at_k)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="拒答正确率" value={pct(runResult.metrics.refusal_correct_rate)} /></Col>
+            <Col xs={12} lg={6}><Statistic title="MRR / nDCG" value={`${runResult.metrics.mrr ?? '—'} / ${runResult.metrics.ndcg_at_k ?? '—'}`} /></Col>
+            <Col xs={12} lg={6}><Statistic title="执行失败" value={runResult.metrics.failed_cases} /></Col>
           </Row>
-          <Row gutter={16} style={{ marginTop: 12 }}>
-            <Col span={4}><Statistic title="无答案率" value={pct(runResult.metrics.no_answer_rate)} suffix="%" /></Col>
-            <Col span={4}><Statistic title="平均延迟" value={runResult.metrics.avg_latency_ms} suffix="ms" /></Col>
-          </Row>
-          <Table
-            size="small"
-            rowKey="case_id"
-            style={{ marginTop: 16 }}
-            pagination={false}
-            dataSource={runResult.runs}
-            columns={[
-              { title: '用例ID', dataIndex: 'case_id', width: 70 },
-              { title: '标题', dataIndex: 'title', ellipsis: true },
-              { title: '场景', dataIndex: 'scenario', width: 120 },
-              { title: '检索命中', dataIndex: 'retrieval_hit', width: 80,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
-              { title: '引用准确', dataIndex: 'citation_correct', width: 80,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
-              { title: '忠实', dataIndex: 'answer_faithful', width: 60,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
-              { title: '失效拦截', dataIndex: 'expired_policy_blocked', width: 80,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
-              { title: '权限隔离', dataIndex: 'permission_isolated', width: 80,
-                render: (v: boolean) => v ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} /> },
-              { title: '无答案', dataIndex: 'no_evidence', width: 70,
-                render: (v: boolean) => v ? <Tag color="orange">是</Tag> : '—' },
-              { title: '耗时', dataIndex: 'latency_ms', width: 80, render: (v: number) => `${v}ms` },
-            ]}
-          />
+          <WorkspaceTableRegion label="逐条评测结果">
+            <Table
+              size="small"
+              rowKey="case_id"
+              style={{ marginTop: 16 }}
+              pagination={false}
+              scroll={{ x: 950 }}
+              dataSource={runResult.runs}
+              columns={[
+                { title: '用例ID', dataIndex: 'case_id', width: 70 },
+                { title: '标题', dataIndex: 'title', ellipsis: true },
+                { title: '场景', dataIndex: 'scenario', width: 120 },
+                { title: '检索命中', dataIndex: 'retrieval_hit', width: 80,
+                  render: evalCheck },
+                { title: '引用准确', dataIndex: 'citation_correct', width: 80,
+                  render: evalCheck },
+                { title: '事实覆盖', dataIndex: 'fact_coverage', width: 80, render: evalCheck },
+                { title: '失效拦截', dataIndex: 'expired_policy_blocked', width: 80,
+                  render: evalCheck },
+                { title: '权限隔离', dataIndex: 'permission_isolated', width: 80,
+                  render: evalCheck },
+                { title: '无答案', dataIndex: 'no_evidence', width: 70,
+                  render: (v: boolean) => v ? <Tag color="orange">是</Tag> : '—' },
+                { title: '耗时', dataIndex: 'latency_ms', width: 80, render: (v: number) => `${v}ms` },
+                { title: '执行结果', dataIndex: 'error', width: 125,
+                  render: (error?: string | null) => error ? <Tag color="error">{error}</Tag> : '完成' },
+              ]}
+            />
+          </WorkspaceTableRegion>
         </Card>
       )}
 
@@ -369,25 +381,28 @@ function EvalTab() {
         {cases.isError ? (
           <ErrorState error={cases.error} retry={() => cases.refetch()} />
         ) : (
-          <Table
-            rowKey="id"
-            size="small"
-            loading={cases.isLoading}
-            dataSource={cases.data}
-            pagination={false}
-            columns={[
-              { title: 'ID', dataIndex: 'id', width: 70 },
-              { title: '标题', dataIndex: 'title', ellipsis: true },
-              { title: '场景', dataIndex: 'scenario', width: 120 },
-              { title: '角色', dataIndex: 'expected_role', width: 100 },
-              { title: '查询', dataIndex: 'query', ellipsis: true },
-              { title: '期望命中', dataIndex: 'expected_doc_ids', width: 120, ellipsis: true },
-              { title: '期望无答案', dataIndex: 'expected_no_answer', width: 90,
-                render: (v: boolean) => v ? <Tag color="orange">是</Tag> : '—' },
-              { title: '启用', dataIndex: 'is_active', width: 60,
-                render: (v: boolean) => v ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
-            ]}
-          />
+          <WorkspaceTableRegion label="评测用例">
+            <Table
+              scroll={{ x: 800 }}
+              rowKey="id"
+              size="small"
+              loading={cases.isLoading}
+              dataSource={cases.data}
+              pagination={false}
+              columns={[
+                { title: 'ID', dataIndex: 'id', width: 70 },
+                { title: '标题', dataIndex: 'title', ellipsis: true },
+                { title: '场景', dataIndex: 'scenario', width: 120 },
+                { title: '角色', dataIndex: 'expected_role', width: 100 },
+                { title: '查询', dataIndex: 'query', ellipsis: true },
+                { title: '期望命中', dataIndex: 'expected_doc_ids', width: 120, ellipsis: true },
+                { title: '期望无答案', dataIndex: 'expected_no_answer', width: 90,
+                  render: (v: boolean) => v ? <Tag color="orange">是</Tag> : '—' },
+                { title: '启用', dataIndex: 'is_active', width: 60,
+                  render: (v: boolean) => v ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
+              ]}
+            />
+          </WorkspaceTableRegion>
         )}
       </Card>
 
@@ -417,7 +432,7 @@ function CreateEvalCaseModal({ onClose }: { onClose: () => void }) {
       confirmLoading={create.isPending}
       width={700}
     >
-      <Form form={form} layout="vertical" initialValues={{ expected_role: 'citizen', is_active: true }}>
+      <Form form={form} layout="vertical" initialValues={{ expected_role: 'citizen', expected_no_answer: false, is_active: true }}>
         <Form.Item name="title" label="标题" rules={[{ required: true, min: 2 }]}><Input /></Form.Item>
         <Form.Item name="scenario" label="场景" rules={[{ required: true }]}><Input placeholder="如：低保咨询" /></Form.Item>
         <Form.Item name="query" label="查询问题" rules={[{ required: true, min: 2 }]}><TextArea rows={2} /></Form.Item>
@@ -430,19 +445,19 @@ function CreateEvalCaseModal({ onClose }: { onClose: () => void }) {
           ]} />
         </Form.Item>
         <Row gutter={12}>
-          <Col span={8}>
+          <Col xs={24} sm={8}>
             <Form.Item name="expected_doc_ids" label="期望命中（逗号分隔）"><Input /></Form.Item>
           </Col>
-          <Col span={8}>
+          <Col xs={24} sm={8}>
             <Form.Item name="must_cite_doc_ids" label="必须引用"><Input /></Form.Item>
           </Col>
-          <Col span={8}>
+          <Col xs={24} sm={8}>
             <Form.Item name="must_not_cite_doc_ids" label="必须不引用"><Input /></Form.Item>
           </Col>
         </Row>
         <Form.Item name="must_avoid_keywords" label="禁止词（逗号分隔）"><Input /></Form.Item>
         <Form.Item name="expected_answer_summary" label="期望答案摘要"><TextArea rows={2} /></Form.Item>
-        <Form.Item name="expected_no_answer" label="期望无答案" valuePropName="checked">
+        <Form.Item name="expected_no_answer" label="期望无答案">
           <Select options={[{ value: false, label: '否' }, { value: true, label: '是' }]} />
         </Form.Item>
         <Form.Item name="notes" label="备注"><TextArea rows={2} /></Form.Item>
@@ -482,7 +497,7 @@ function NoAnswerTab() {
         description="市民/坐席/部门人员发起的 RAG 查询未检索到依据时，会记录在此。管理员需补充对应政策并标记处理结果。"
         style={{ marginBottom: 16 }}
       />
-      <Space style={{ marginBottom: 16 }}>
+      <Space wrap style={{ marginBottom: 16 }}>
         <Select
           allowClear
           placeholder="全部状态"
@@ -500,35 +515,38 @@ function NoAnswerTab() {
       {list.isError ? (
         <ErrorState error={list.error} retry={() => list.refetch()} />
       ) : (
-        <Table
-          rowKey="id"
-          size="small"
-          loading={list.isLoading}
-          dataSource={list.data?.items}
-          pagination={{
-            current: page, pageSize: 20, total: list.data?.total || 0,
-            onChange: setPage,
-          }}
-          columns={[
-            { title: 'ID', dataIndex: 'id', width: 70 },
-            { title: '提问时间', dataIndex: 'created_at', width: 150,
-              render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
-            { title: '问题', dataIndex: 'query_text', ellipsis: true },
-            { title: '角色', dataIndex: 'role', width: 100 },
-            { title: '来源路由', dataIndex: 'route', width: 120 },
-            { title: '状态', dataIndex: 'status', width: 100,
-              render: (s: KbNoAnswerStatus) => {
-                const map = { open: { c: 'orange', l: '待处理' }, assigned: { c: 'blue', l: '已分派' }, resolved: { c: 'green', l: '已解决' }, wont_fix: { c: 'default', l: '不予处理' } }
-                return <Tag color={map[s].c}>{map[s].l}</Tag>
-              } },
-            { title: '处理时间', dataIndex: 'resolved_at', width: 150,
-              render: (v?: string | null) => v ? v.replace('T', ' ').slice(0, 19) : '—' },
-            { title: '操作', key: 'actions', width: 200, fixed: 'right' as const,
-              render: (_: unknown, r: KbNoAnswer) => (
-                <ResolveAction na={r} onResolve={(s, note) => resolve.mutate({ id: r.id, status: s, note })} loading={resolve.isPending} />
-              ) },
-          ]}
-        />
+        <WorkspaceTableRegion label="建议记录">
+          <Table
+            scroll={{ x: 850 }}
+            rowKey="id"
+            size="small"
+            loading={list.isLoading}
+            dataSource={list.data?.items}
+            pagination={{
+              current: page, pageSize: 20, total: list.data?.total || 0,
+              onChange: setPage,
+            }}
+            columns={[
+              { title: 'ID', dataIndex: 'id', width: 70 },
+              { title: '提问时间', dataIndex: 'created_at', width: 150,
+                render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
+              { title: '问题', dataIndex: 'query_text', ellipsis: true },
+              { title: '角色', dataIndex: 'role', width: 100 },
+              { title: '来源路由', dataIndex: 'route', width: 120 },
+              { title: '状态', dataIndex: 'status', width: 100,
+                render: (s: KbNoAnswerStatus) => {
+                  const map = { open: { c: 'orange', l: '待处理' }, assigned: { c: 'blue', l: '已分派' }, resolved: { c: 'green', l: '已解决' }, wont_fix: { c: 'default', l: '不予处理' } }
+                  return <Tag color={map[s].c}>{map[s].l}</Tag>
+                } },
+              { title: '处理时间', dataIndex: 'resolved_at', width: 150,
+                render: (v?: string | null) => v ? v.replace('T', ' ').slice(0, 19) : '—' },
+              { title: '操作', key: 'actions', width: 200,
+                render: (_: unknown, r: KbNoAnswer) => (
+                  <ResolveAction na={r} onResolve={(s, note) => resolve.mutate({ id: r.id, status: s, note })} loading={resolve.isPending} />
+                ) },
+            ]}
+          />
+        </WorkspaceTableRegion>
       )}
     </Card>
   )
@@ -583,7 +601,7 @@ function FeedbackTab() {
         description="管理员可查看所有角色对 RAG 回答的反馈，结合反馈类型优化知识库内容。"
         style={{ marginBottom: 16 }}
       />
-      <Space style={{ marginBottom: 16 }}>
+      <Space wrap style={{ marginBottom: 16 }}>
         <Select
           allowClear
           placeholder="全部反馈类型"
@@ -601,32 +619,35 @@ function FeedbackTab() {
       {list.isError ? (
         <ErrorState error={list.error} retry={() => list.refetch()} />
       ) : (
-        <Table
-          rowKey="id"
-          size="small"
-          loading={list.isLoading}
-          dataSource={list.data?.items}
-          pagination={{
-            current: page, pageSize: 20, total: list.data?.total || 0,
-            onChange: setPage,
-          }}
-          columns={[
-            { title: 'ID', dataIndex: 'id', width: 70 },
-            { title: '时间', dataIndex: 'created_at', width: 150,
-              render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
-            { title: '反馈类型', dataIndex: 'feedback_type', width: 100,
-              render: (t: KbFeedbackType) => {
-                const map = { helpful: { c: 'green', l: '有帮助' }, inaccurate: { c: 'red', l: '不准确' }, outdated: { c: 'orange', l: '过时' }, no_answer: { c: 'default', l: '未解答' } }
-                return <Tag color={map[t].c}>{map[t].l}</Tag>
-              } },
-            { title: '用户ID', dataIndex: 'user_id', width: 80 },
-            { title: '来源路由', dataIndex: 'route', width: 120 },
-            { title: '问题', dataIndex: 'query_text', ellipsis: true },
-            { title: '引用文档', dataIndex: 'document_ids', width: 140,
-              render: (ids: string[]) => ids.join(', ') || '—' },
-            { title: '评论', dataIndex: 'comment', ellipsis: true },
-          ]}
-        />
+        <WorkspaceTableRegion label="政策反馈">
+          <Table
+            scroll={{ x: 940 }}
+            rowKey="id"
+            size="small"
+            loading={list.isLoading}
+            dataSource={list.data?.items}
+            pagination={{
+              current: page, pageSize: 20, total: list.data?.total || 0,
+              onChange: setPage,
+            }}
+            columns={[
+              { title: 'ID', dataIndex: 'id', width: 70 },
+              { title: '时间', dataIndex: 'created_at', width: 150,
+                render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
+              { title: '反馈类型', dataIndex: 'feedback_type', width: 100,
+                render: (t: KbFeedbackType) => {
+                  const map = { helpful: { c: 'green', l: '有帮助' }, inaccurate: { c: 'red', l: '不准确' }, outdated: { c: 'orange', l: '过时' }, no_answer: { c: 'default', l: '未解答' } }
+                  return <Tag color={map[t].c}>{map[t].l}</Tag>
+                } },
+              { title: '用户ID', dataIndex: 'user_id', width: 80 },
+              { title: '来源路由', dataIndex: 'route', width: 120 },
+              { title: '问题', dataIndex: 'query_text', ellipsis: true },
+              { title: '引用文档', dataIndex: 'document_ids', width: 140,
+                render: (ids: string[]) => ids.join(', ') || '—' },
+              { title: '评论', dataIndex: 'comment', ellipsis: true },
+            ]}
+          />
+        </WorkspaceTableRegion>
       )}
     </Card>
   )
@@ -642,6 +663,11 @@ function kbTypeLabel(t: string) {
   return map[t] || t
 }
 
-function pct(v: number) {
-  return Math.round(v * 1000) / 10
+function pct(value: number | null | undefined) {
+  return value == null ? '未评测' : `${Math.round(value * 1000) / 10}%`
+}
+
+function evalCheck(value: boolean | null) {
+  if (value == null) return '—'
+  return value ? <Tag color="success">通过</Tag> : <Tag color="error">未通过</Tag>
 }

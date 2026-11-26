@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, extractDispositionFilename, triggerBlobDownload } from './client'
 import type { ApiSuccess, AttachmentList, AttachmentType, AttachmentVisibility, TicketAttachment } from '../types'
 
 export const attachmentKeys={ticket:(ticketId:string)=>['attachments',ticketId] as const}
@@ -16,15 +16,24 @@ export async function deleteAttachment(attachmentId:string,reason:string){
   return (await api.delete<ApiSuccess<{deleted:boolean}>>(`/attachments/${attachmentId}`,{data:{reason}})).data.data
 }
 
-function responseFilename(disposition:string|undefined,fallback:string){
-  const encoded=disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
-  if(!encoded)return fallback
-  try{return decodeURIComponent(encoded)}catch{return fallback}
-}
-
 export async function downloadAttachment(attachment:TicketAttachment){
   const response=await api.get<Blob>(`/attachments/${attachment.id}/download`,{responseType:'blob',timeout:60_000})
-  const url=URL.createObjectURL(response.data)
-  const anchor=document.createElement('a');anchor.href=url;anchor.download=responseFilename(response.headers['content-disposition'],attachment.original_filename)
-  document.body.appendChild(anchor);anchor.click();anchor.remove();URL.revokeObjectURL(url)
+  triggerBlobDownload(response.data,extractDispositionFilename(response.headers['content-disposition'],attachment.original_filename))
+}
+
+const previewTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf'])
+
+export function canPreviewAttachment(attachment: TicketAttachment) {
+  return attachment.scan_status === 'clean' && previewTypes.has(attachment.content_type)
+}
+
+export async function loadAttachmentPreview(attachment: TicketAttachment, signal?: AbortSignal) {
+  if (!canPreviewAttachment(attachment)) throw new Error('该附件不支持预览')
+  const response = await api.get<Blob>(`/attachments/${attachment.id}/download`, {
+    responseType: 'blob',
+    timeout: 60_000,
+    signal,
+  })
+  if (response.data.type !== attachment.content_type) throw new Error('文件类型不一致，请下载后核实')
+  return response.data
 }

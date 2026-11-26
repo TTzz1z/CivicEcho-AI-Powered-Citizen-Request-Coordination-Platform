@@ -1,10 +1,14 @@
 # Production-equivalent override.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
+# Usage: docker compose --env-file .env.prod -f docker-compose.yml -f docker-compose.prod.yml up -d --wait
 # Requires: .env.prod (copy from .env.prod.example and fill strong secrets)
+
+name: civicecho-production
 
 services:
   caddy:
-    image: caddy:2-alpine
+    image: "${CADDY_IMAGE:-caddy:2-alpine}"
+    cpus: "${CADDY_CPU_LIMIT:-1.0}"
+    mem_limit: "${CADDY_MEMORY_LIMIT:-256m}"
     ports:
       - "80:80"
       - "443:443"
@@ -18,7 +22,7 @@ services:
       frontend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/config/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -31,7 +35,9 @@ services:
 
   clamav:
     # Official image (preloaded signatures). Old mkodockx/0.104 gets CDN 403 and has no clamdcheck.
-    image: clamav/clamav:stable
+    image: "${CLAMAV_IMAGE:-clamav/clamav:stable}"
+    cpus: "${CLAMAV_CPU_LIMIT:-2.0}"
+    mem_limit: "${CLAMAV_MEMORY_LIMIT:-2048m}"
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
@@ -49,6 +55,9 @@ services:
 
   frontend:
     ports: !override []
+    build:
+      args:
+        VITE_DEMO_MODE: "false"
     logging:
       driver: json-file
       options:
@@ -63,7 +72,34 @@ services:
         max-file: "3"
 
   minio:
+    # Legacy data keeps its original service and volume. Do not start it by default.
+    profiles: !override [legacy-minio]
     ports: !override []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  object-storage:
+    image: "${PRODUCTION_OBJECT_STORAGE_IMAGE:-chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9}"
+    command: ["mini", "-dir=/data", "-ip=object-storage", "-admin.ui=false", "-webdav=false", "-s3.autoCreateBucket=false"]
+    cpus: "${OBJECT_STORAGE_CPU_LIMIT:-2.0}"
+    mem_limit: "${OBJECT_STORAGE_MEMORY_LIMIT:-1024m}"
+    environment:
+      AWS_ACCESS_KEY_ID: "${OBJECT_STORAGE_ACCESS_KEY:?Set OBJECT_STORAGE_ACCESS_KEY in .env.prod}"
+      AWS_SECRET_ACCESS_KEY: "${OBJECT_STORAGE_SECRET_KEY:?Set OBJECT_STORAGE_SECRET_KEY in .env.prod}"
+      S3_BUCKET: "${OBJECT_STORAGE_BUCKET:-tingting-attachments},${KB_UPLOAD_BUCKET:-tingting-kb}"
+    networks: [storage]
+    volumes:
+      - object_storage_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
     logging:
       driver: json-file
       options:
@@ -72,18 +108,21 @@ services:
 
   backend:
     ports: !override []
+    networks: [default, storage]
     environment:
       APP_ENV: "production"
       CORS_ORIGINS: "${CORS_ORIGINS:?Set CORS_ORIGINS in .env.prod}"
-      # In-cluster MinIO stays HTTP; external TLS terminates at Caddy.
-      OBJECT_STORAGE_SECURE: "false"
+      OBJECT_STORAGE_ENDPOINT: "${PRODUCTION_OBJECT_STORAGE_ENDPOINT:-object-storage:8333}"
+      OBJECT_STORAGE_SECURE: "${OBJECT_STORAGE_SECURE:-false}"
+      OBJECT_STORAGE_REGION: "${OBJECT_STORAGE_REGION:-us-east-1}"
+      OBJECT_STORAGE_READINESS_REQUIRED: "true"
       MALWARE_SCAN_MODE: "clamd"
       MALWARE_SCAN_URL: "clamav:3310"
       MALWARE_SCAN_REQUIRE_CLEAN: "true"
-    depends_on:
+    depends_on: !override
       postgres:
         condition: service_healthy
-      minio:
+      object-storage:
         condition: service_healthy
       clamav:
         condition: service_healthy
@@ -93,32 +132,12 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  duckling:
-    ports: !override []
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  action_server:
-    ports: !override []
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  rasa:
-    ports: !override []
-    command: ["run", "--enable-api", "--cors", "${CORS_ORIGINS}", "--port", "5005", "--model", "/app/models/tingting-v1.3.0.tar.gz"]
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   worker:
+    networks: [default, storage]
+    environment:
+      OBJECT_STORAGE_ENDPOINT: "${PRODUCTION_OBJECT_STORAGE_ENDPOINT:-object-storage:8333}"
+      OBJECT_STORAGE_SECURE: "${OBJECT_STORAGE_SECURE:-false}"
+      OBJECT_STORAGE_REGION: "${OBJECT_STORAGE_REGION:-us-east-1}"
     logging:
       driver: json-file
       options:
@@ -129,3 +148,8 @@ volumes:
   caddy_data:
   caddy_config:
   clamav_data:
+  object_storage_data:
+
+networks:
+  storage:
+    internal: true

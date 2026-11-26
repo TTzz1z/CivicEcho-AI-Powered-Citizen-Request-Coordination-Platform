@@ -27,7 +27,6 @@ env:
   SERVICE_API_TOKEN: ci-only-action-service-token
   SEED_PASSWORD: CI-Seed-Only-From-Workflow-2026!
   E2E_PASSWORD: CI-E2E-Only-From-Workflow-2026!
-  RASA_TELEMETRY_ENABLED: "false"
 
 jobs:
   static-checks:
@@ -42,8 +41,8 @@ jobs:
             backend/requirements-dev.txt
             backend/requirements.lock.txt
       - run: python -m pip install ruff==0.8.6
-      - run: python -m compileall -q backend/app backend/tests actions channels tests
-      - run: ruff check --select E9,F63,F7,F82 backend/app backend/tests actions channels tests
+      - run: python -m compileall -q backend/app backend/tests
+      - run: ruff check --select E9,F63,F7,F82 backend/app backend/tests
       - run: docker compose config -q
 
   frontend-tests:
@@ -78,6 +77,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgresql+psycopg://tingting_ci:ci-only-postgres-password@localhost:5432/tingting_ci
+      RUN_ISOLATED_MODEL_TEST: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -92,22 +92,6 @@ jobs:
         run: alembic check
       - working-directory: backend
         run: pytest -q
-
-  action-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build -f Dockerfile.actions -t tingting-actions:ci .
-      - run: docker run --rm --entrypoint python tingting-actions:ci -m unittest discover -s /app/tests -p "test_public_request_actions.py" -v
-      - run: docker run --rm --entrypoint python tingting-actions:ci -m unittest discover -s /app/tests -p "test_ticket_gateway.py" -v
-
-  rasa-regression:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose run --rm --no-deps rasa data validate
-      - run: docker compose run --rm --no-deps rasa test core --stories tests/test_conversations_ci.yml --model models/tingting-v1.3.0.tar.gz --fail-on-prediction-errors --out results/ci-core
-      - run: docker compose run --rm --no-deps rasa test nlu --nlu tests/test_nlu.yml --model models/tingting-v1.3.0.tar.gz --out results/ci-nlu
 
   e2e-smoke:
     runs-on: ubuntu-latest
@@ -157,7 +141,6 @@ jobs:
           cache: pip
           cache-dependency-path: |
             backend/requirements.lock.txt
-            actions/requirements-actions.txt
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -172,39 +155,15 @@ jobs:
       - name: pip-audit backend lockfile
         run: |
           for i in 1 2 3 4 5; do
-            pip-audit -r backend/requirements.lock.txt && exit 0
+            pip-audit --timeout 60 --no-deps -r backend/requirements.lock.txt && exit 0
             echo "pip-audit backend attempt $i failed; retrying..."
-            sleep $((i * 5))
-          done
-          exit 1
-      # Sanic-Cors 2.2.0 is the latest upstream release; the Action Server is
-      # loopback-only while the upstream CVE remains unfixed.
-      - name: pip-audit actions requirements
-        run: |
-          for i in 1 2 3 4 5; do
-            pip-audit -r actions/requirements-actions.txt --ignore-vuln CVE-2026-37737 && exit 0
-            echo "pip-audit actions attempt $i failed; retrying..."
-            sleep $((i * 5))
-          done
-          exit 1
-      - run: docker build -f Dockerfile.actions -t tingting-actions-security:ci .
-      - name: pip-audit actions image
-        run: |
-          for i in 1 2 3 4 5; do
-            docker run --rm --user root --entrypoint sh \
-              -e PIP_DEFAULT_TIMEOUT \
-              -e PIP_RETRIES \
-              tingting-actions-security:ci -ec \
-              "python -m pip install --no-cache-dir pip-audit && python -m pip_audit --ignore-vuln CVE-2026-37737" \
-              && exit 0
-            echo "pip-audit image attempt $i failed; retrying..."
             sleep $((i * 5))
           done
           exit 1
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit
 
   docker-integration:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -232,12 +191,8 @@ jobs:
       POSTGRES_PASSWORD: CiProdPgSecret9f3a2b7c1d4e5f60
       JWT_SECRET: ci-prod-jwt-secret-at-least-32-characters-long
       SERVICE_API_TOKEN: ci-prod-service-token-at-least-32-chars
-      SEED_PASSWORD: CI-Seed-Only-From-Workflow-2026!
-      MINIO_ROOT_USER: ciProdMinioUser
-      MINIO_ROOT_PASSWORD: CiProdMinioSecret9f3a2b7c1d4e
-      OBJECT_STORAGE_ACCESS_KEY: ciProdMinioUser
-      OBJECT_STORAGE_SECRET_KEY: CiProdMinioSecret9f3a2b7c1d4e
-      OBJECT_STORAGE_ENDPOINT: minio:9000
+      OBJECT_STORAGE_ACCESS_KEY: ciProdStorageUser
+      OBJECT_STORAGE_SECRET_KEY: CiProdStorageSecret9f3a2b7c1d4e
       OBJECT_STORAGE_BUCKET: tingting-attachments
       KB_UPLOAD_BUCKET: tingting-kb
       OBJECT_STORAGE_SECURE: "false"
@@ -259,21 +214,16 @@ jobs:
             'APP_ENV=production' \
             'SITE_ADDRESS=localhost' \
             'CORS_ORIGINS=https://localhost' \
-            'RASA_CORS_ORIGIN=https://localhost' \
             'POSTGRES_DB=tingting' \
             'POSTGRES_USER=tingting' \
-            'MINIO_ROOT_USER=ciProdMinioUser' \
-            'MINIO_ROOT_PASSWORD=CiProdMinioSecret9f3a2b7c1d4e' \
-            'OBJECT_STORAGE_ENDPOINT=minio:9000' \
-            'OBJECT_STORAGE_ACCESS_KEY=ciProdMinioUser' \
-            'OBJECT_STORAGE_SECRET_KEY=CiProdMinioSecret9f3a2b7c1d4e' \
+            'OBJECT_STORAGE_ACCESS_KEY=ciProdStorageUser' \
+            'OBJECT_STORAGE_SECRET_KEY=CiProdStorageSecret9f3a2b7c1d4e' \
             'OBJECT_STORAGE_BUCKET=tingting-attachments' \
             'KB_UPLOAD_BUCKET=tingting-kb' \
             'OBJECT_STORAGE_SECURE=false' \
             'MALWARE_SCAN_MODE=clamd' \
             'MALWARE_SCAN_URL=clamav:3310' \
             'MALWARE_SCAN_REQUIRE_CLEAN=true' \
-            'SEED_PASSWORD=CI-Seed-Only-From-Workflow-2026!' \
             > .env.prod
       - name: Validate production compose
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod config -q
@@ -286,13 +236,13 @@ jobs:
           # Pre-build/pull outside `compose up` — a single up --build on GHA often hits
           # COMPOSE_HTTP_TIMEOUT (~5m) while pip-installing the backend image.
           docker pull pgvector/pgvector:pg16
-          docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z
+          compose pull object-storage
           docker build -f Dockerfile.clamav-mock -t tingting-clamav-mock:ci .
           docker build --build-arg "CI_CACHEBUST=${GITHUB_SHA}" -f Dockerfile.backend -t tingting-ci-backend:ci .
           # Guard against stale Settings that still require OBJECT_STORAGE_SECURE=true.
           docker run --rm tingting-ci-backend:ci python -c "import inspect; from app.config import Settings; src=inspect.getsource(Settings.reject_weak_production_secrets); assert 'OBJECT_STORAGE_SECURE must be true' not in src, src; print('settings-guard-ok')"
-          # Core production path only (avoid full Rasa/frontend stack flakiness on runners).
-          if ! compose up -d --no-build postgres minio clamav; then
+          # Core production path only (avoid frontend stack flakiness on runners).
+          if ! compose up -d --no-build postgres object-storage clamav; then
             compose ps -a || true
             compose logs --no-color --tail=200 || true
             exit 1
@@ -301,9 +251,9 @@ jobs:
           for i in $(seq 1 60); do
             # pg_isready can return 0 before the role/db exist; require a real SQL probe.
             pg_ok=$(compose exec -T postgres psql -U tingting -d tingting -tAc 'SELECT 1' >/dev/null 2>&1 && echo 1 || echo 0)
-            minio_ok=$(compose exec -T minio curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && echo 1 || echo 0)
+            storage_ok=$(compose exec -T object-storage wget -q -O /dev/null http://127.0.0.1:8333/healthz >/dev/null 2>&1 && echo 1 || echo 0)
             clam_ok=$(compose exec -T clamav python -c "import socket; s=socket.create_connection(('127.0.0.1',3310),2); s.close()" >/dev/null 2>&1 && echo 1 || echo 0)
-            if [ "$pg_ok" = "1" ] && [ "$minio_ok" = "1" ] && [ "$clam_ok" = "1" ]; then
+            if [ "$pg_ok" = "1" ] && [ "$storage_ok" = "1" ] && [ "$clam_ok" = "1" ]; then
               echo "infra ready"
               infra_ready=1
               break
@@ -336,7 +286,7 @@ jobs:
             compose logs --no-color --tail=200 backend worker postgres || true
             exit 1
           fi
-      - name: Wait for core services (postgres/minio/backend)
+      - name: Wait for PostgreSQL, object storage and API
         run: |
           set -eux
           compose() {
@@ -358,7 +308,7 @@ jobs:
             echo "## production-compose readiness failure"
             echo '```'
             compose ps -a || true
-            compose logs --no-color --tail=200 backend worker postgres minio clamav || true
+            compose logs --no-color --tail=200 backend worker postgres object-storage clamav || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1
@@ -393,8 +343,31 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend alembic current
           docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"
-      - name: Seed demo profile
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T -e SEED_PASSWORD -e SEED_PROFILE=demo backend python -m app.seed
+      - name: Verify production storage and demo-seed guard
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python - <<'PY'
+          from io import BytesIO
+          from uuid import uuid4
+          from app.seed import seed
+          from app.storage import get_kb_object_storage, get_object_storage
+          try:
+              seed("demo")
+          except SystemExit as exc:
+              assert "生产环境禁止" in str(exc)
+          else:
+              raise AssertionError("Production accepts demo seeding")
+          for store in (get_object_storage(), get_kb_object_storage()):
+              key = f"ci/{uuid4().hex}"
+              store.put(key, BytesIO(b"civicecho"), 9, "text/plain")
+              assert store.size(key) == 9
+              reader = store.open(key)
+              try:
+                  assert reader.read() == b"civicecho"
+              finally:
+                  reader.close()
+                  reader.release_conn()
+                  store.delete(key)
+          PY
       - name: Verify ClamAV scanner rejects EICAR
         run: |
           docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ci-prod.yml --env-file .env.prod exec -T backend python - <<'PY'

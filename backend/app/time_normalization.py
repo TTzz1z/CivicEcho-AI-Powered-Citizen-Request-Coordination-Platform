@@ -19,7 +19,7 @@ def _day_bounds(day, zone: ZoneInfo) -> tuple[datetime, datetime]:
 
 
 def normalize_chinese_time(text: str | None, timezone_name: str, now: datetime | None = None) -> NormalizedTime | None:
-    """Conservative parser for the verified expressions not already normalized by Duckling."""
+    """Conservative parser for verified relative Chinese time expressions."""
     if not text:
         return None
     zone = ZoneInfo(timezone_name)

@@ -8,7 +8,7 @@
  *   4. Multi-intent query triggers clarify route
  *   5. LLM-disabled degradation (orchestrator still answers via rules)
  *   6. Embedding-disabled degradation (vector search skipped, keyword-only)
- *   7. Real LLM call records total_tokens > 0 in ai_usage_logs
+ *   7. Rules/degraded calls are recorded for the originating session
  *   8. RAG / ticket_advice / pre_review / ai_analyze all write ai_usage_logs
  *   9. AI advice review (adopted / adopted_with_edits / rejected) doesn't
  *      change ticket status
@@ -22,7 +22,7 @@
  */
 import { expect, test } from '@playwright/test'
 
-const PASSWORD = process.env.E2E_PASSWORD || 'tingting-seed-demo-2026'
+import { e2ePassword as PASSWORD } from './env'
 const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:8081'
 
 async function apiLogin(request: import('@playwright/test').APIRequestContext, username: string): Promise<string> {
@@ -50,7 +50,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   test.setTimeout(60_000)
 
   test('1. policy_rag 不建单（咨询问题不创建草稿）', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     const result = await sendChat(token, request, {
       message: '城市道路路灯维修责任归属的政策规定是什么？请只做政策解答，不要建单',
@@ -67,7 +66,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('2. service_guide 必须返回 citations', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     // Use a phrase that the rule classifier maps to service_guide.
     const result = await sendChat(token, request, {
@@ -95,7 +93,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('3. 无依据拒答（生僻话题）', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     const result = await sendChat(token, request, {
       message: '量子力学中的波函数坍缩在哪些条款里有规定',
@@ -113,7 +110,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('4. 多意图进入 clarify', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     // "咨询政策 + 投诉窗口不给办" is the canonical multi-intent sample.
     const result = await sendChat(token, request, {
@@ -130,7 +126,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('5. LLM 禁用时降级路径仍可响应', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     // Send a deterministic routing query (greeting) — rule classifier handles
     // this without LLM. The system should respond even if LLM is unavailable.
@@ -147,7 +142,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('6. Embedding 禁用时降级到关键词检索', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     // Query a known keyword from seed data ("路灯报修") — even if embedding is
     // unavailable, the keyword recall path should still find relevant chunks.
@@ -162,40 +156,24 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
     expect(['policy_rag', 'service_guide', 'clarify', 'general_chat', 'out_of_scope', 'ticket_intake']).toContain(data.route)
   })
 
-  test('7. ai_usage_logs 记录真实 Token > 0（LLM 调用）', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
+  test('7. ai_usage_logs 记录当前会话的规则或降级调用', async ({ request }) => {
     const token = await apiLogin(request, 'citizen_local')
     const session = `r2-test-7-${Date.now()}`
-    // Trigger an LLM-backed capability.
-    await sendChat(token, request, { message: '你好', session_id: session })
-    // Query the admin AI usage logs endpoint (paginated).
+    const result = await sendChat(token, request, { message: '你好', session_id: session })
+    expect(result.status).toBe(200)
     const adminToken = await apiLogin(request, 'admin_local')
-    const logsRes = await request.get(`/api/v1/admin/ai-usage/logs?page_size=100`, {
+    const logsRes = await request.get(`/api/v1/admin/ai-usage/logs?session_id=${session}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     })
     expect(logsRes.ok()).toBeTruthy()
     const payload = await logsRes.json()
-    const logs = payload.data?.items || payload.data || []
-    expect(logs.length, 'ai_usage_logs should have entries').toBeGreaterThan(0)
-    // Prefer real LLM token counts when present; otherwise accept rules/degraded
-    // or zero-token provider stubs common in CI without paid keys.
-    const llmEntries = logs.filter((l: any) => l.model_tier !== 'rules')
-    if (llmEntries.length > 0) {
-      const positiveTokens = llmEntries.filter((l: any) => (l.total_tokens || 0) > 0)
-      if (positiveTokens.length === 0) {
-        expect(llmEntries.length, 'non-rules log entries exist even when token counters are stubbed').toBeGreaterThan(0)
-      } else {
-        expect(positiveTokens.length).toBeGreaterThan(0)
-      }
-    } else {
-      // All rules-tier — environment has no LLM. Verify degraded flags exist.
-      const degraded = logs.filter((l: any) => l.degraded === true)
-      expect(degraded.length, 'rules-tier entries should be marked degraded when LLM is unavailable').toBeGreaterThan(0)
-    }
+    const logs = payload.data.items as Array<{ session_id: string; model_tier: string; degraded: boolean; total_tokens: number }>
+    expect(logs).not.toHaveLength(0)
+    expect(logs.every(log => log.session_id === session)).toBe(true)
+    expect(logs.some(log => (log.model_tier === 'rules' || log.degraded) && log.total_tokens === 0)).toBe(true)
   })
 
   test('8. RAG / 办件助手 / 预审 / 分析均写入 ai_usage_logs', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const citizenToken = await apiLogin(request, 'citizen_local')
     const agentToken = await apiLogin(request, 'agent_local')
     const staffToken = await apiLogin(request, 'department_local')
@@ -247,7 +225,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('9. AI 建议三态确认不修改工单状态', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const citizenToken = await apiLogin(request, 'citizen_local')
     const agentToken = await apiLogin(request, 'agent_local')
     const staffToken = await apiLogin(request, 'department_local')
@@ -302,7 +279,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('10. session 隔离（两个 session 不共享计数）', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     const s1 = `r2-test-10-s1-${Date.now()}`
     const s2 = `r2-test-10-s2-${Date.now()}`
@@ -327,7 +303,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('11. 失效政策不进入答案', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     const token = await apiLogin(request, 'citizen_local')
     // Query the citizen RAG endpoint directly to inspect citations.
     const res = await request.post('/api/v1/kb/query', {
@@ -352,7 +327,6 @@ test.describe('Round 2 — AI 可信度与 RAG 边界 E2E', () => {
   })
 
   test('12. service principal 权限回归（仅 PUBLIC/PUBLISHED）', async ({ request }) => {
-    test.skip(!PASSWORD, '需要 E2E_PASSWORD')
     // Service principals should only see PUBLIC/PUBLISHED docs in list and
     // RAG results. We verify by logging in as a citizen (also PUBLIC-only) and
     // confirming no INTERNAL / DEPARTMENT / EXPIRED docs leak.

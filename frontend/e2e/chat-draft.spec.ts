@@ -1,6 +1,6 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './browser-check'
 
-const PASSWORD = process.env.E2E_PASSWORD || 'tingting-seed-demo-2026'
+import { e2ePassword as PASSWORD } from './env'
 
 async function loginAsCitizen(page: import('@playwright/test').Page) {
   await page.goto('/login')
@@ -10,18 +10,17 @@ async function loginAsCitizen(page: import('@playwright/test').Page) {
   await page.waitForURL('**/citizen/**', { timeout: 15000 })
 }
 
-// P0-E2E: wait for /orchestrator/chat API response so draft panel assertions
-// run against the real structured result, not a stale DOM state.
+// Wait for the current chat stream before checking the draft panel.
 async function sendChatAndWait(page: import('@playwright/test').Page, text: string) {
   const input = page.getByLabel('输入消息')
   await input.fill(text)
   const responsePromise = page.waitForResponse(
-    r => r.url().includes('/api/v1/orchestrator/chat') && r.status() === 200,
+    r => r.url().endsWith('/api/v1/orchestrator/chat/stream') && r.status() === 200,
     { timeout: 30_000 }
   )
   await page.getByRole('button', { name: /^发送$/ }).click()
   const response = await responsePromise
-  try { await response.json() } catch { /* drained */ }
+  expect(await response.text()).toContain('event: done')
 }
 
 test.describe('智能对话建单 - 草稿模式', () => {
@@ -84,9 +83,8 @@ test.describe('智能对话建单 - 草稿模式', () => {
 
     const submitBtn = page.getByRole('button', { name: '确认提交工单' })
     if (!(await submitBtn.isEnabled())) {
-      const locationRow = page.locator('.draft-panel .ant-descriptions-item').filter({ hasText: '发生地点' })
-      await locationRow.getByRole('button').first().click()
-      const locInput = page.locator('.draft-panel input').first()
+      await page.getByRole('button', { name: '编辑发生地点' }).click()
+      const locInput = page.getByLabel('发生地点', { exact: true })
       await locInput.fill('不适用')
       await locInput.blur()
       await expect(submitBtn).toBeEnabled({ timeout: 5_000 })

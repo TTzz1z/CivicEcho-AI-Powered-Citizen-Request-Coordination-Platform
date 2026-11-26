@@ -1,6 +1,2 @@
--c constraints-legacy.txt
-
-# Verified legacy baseline. Upgrade only through the migration plan.
-rasa==3.0.13
-rasa-sdk==3.0.7  # keep aligned with Dockerfile.actions
--r actions/requirements-actions.txt
+# Backend dependencies shared with Docker and CI. Use Python 3.11 on Linux.
+-r backend/requirements.lock.txt

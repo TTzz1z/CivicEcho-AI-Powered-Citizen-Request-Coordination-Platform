@@ -1,0 +1,54 @@
+:root {
+  /* CivicEcho Flagship v3 · Monochrome Precision + Single Cobalt Accent */
+  --ce-shell: #f4f5f7;
+  --ce-canvas: #f4f5f7;
+  --ce-paper: #ffffff;
+  --ce-soft: #fafafb;
+  --ce-muted-bg: #f1f2f5;
+  --ce-selected: #ffffff;
+
+  --ce-nav: #09090b;
+  --ce-nav-hover: rgba(9, 9, 11, 0.045);
+  --ce-nav-active: #ffffff;
+  --ce-nav-text: #52525b;
+  --ce-nav-muted: #626a79;
+
+  --ce-ink: #09090b;
+  --ce-ink-2: #27272a;
+  --ce-muted: #52525b;
+  --ce-tertiary: #626a79;
+
+  --ce-primary: #09090b;
+  --ce-primary-hover: #27272a;
+  --ce-accent: #2563eb;
+  --ce-accent-soft: rgba(37, 99, 235, 0.08);
+  --ce-focus: #2563eb;
+
+  --ce-line: rgba(9, 9, 11, 0.08);
+  --ce-line-solid: #e8eaed;
+  --ce-line-strong: rgba(9, 9, 11, 0.14);
+
+  --ce-success: #087452;
+  --ce-warning: #d97706;
+  --ce-danger: #e11d48;
+
+  --ce-radius: 10px;
+  --ce-radius-lg: 12px;
+  --ce-radius-sm: 6px;
+
+  --ce-shadow: 0 1px 2px rgba(9, 9, 11, 0.03), 0 4px 14px -4px rgba(9, 9, 11, 0.03);
+  --ce-shadow-pill: 0 1px 2px rgba(9, 9, 11, 0.05), inset 0 0 0 1px rgba(9, 9, 11, 0.07);
+  --ce-shadow-elevated: 0 0 0 1px rgba(9, 9, 11, 0.07), 0 4px 12px -2px rgba(9, 9, 11, 0.04), 0 24px 64px -16px rgba(9, 9, 11, 0.12);
+
+  --ce-space-1: 4px;
+  --ce-space-2: 8px;
+  --ce-space-3: 12px;
+  --ce-space-4: 16px;
+  --ce-space-5: 20px;
+  --ce-space-6: 24px;
+  --ce-space-8: 32px;
+  --ce-topbar: 50px;
+
+  --ce-font: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif;
+  --ce-mono: "JetBrains Mono", "SF Mono", "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+}

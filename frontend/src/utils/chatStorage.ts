@@ -98,8 +98,6 @@ export function saveChatMessages<T>(key: string, messages: T[]): void {
   localStorage.setItem(key, JSON.stringify(wrap(redacted)))
 }
 
-type DraftLike = object
-
 /** Contact and similar fields must not linger in long-lived browser storage. */
 export function sanitizeDraftForStorage<T extends object>(draft: T): T {
   const next: Record<string, unknown> = { ...(draft as Record<string, unknown>) }

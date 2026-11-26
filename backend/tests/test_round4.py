@@ -139,7 +139,7 @@ def test_complete_workflow_authorization_history_and_audit(identities):
         assert all("password" not in (x.details or "").lower() for x in logs)
 
 
-def test_citizen_can_view_rasa_ticket_bound_to_stable_sender(identities):
+def test_citizen_can_view_service_ticket_bound_to_stable_sender(identities):
     citizen, other_citizen = identities["users"][("citizen", True)]
     data = ticket_payload() | {"creator_reference": f"web-user-{citizen['id']}"}
     created = client.post(

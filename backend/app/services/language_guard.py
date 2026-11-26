@@ -1,8 +1,8 @@
 """Strict Chinese language consistency for citizen-facing bot replies.
 
-Detects English / mixed IT-helpdesk residue (legacy Rasa Helpdesk templates)
-and replaces with a fixed Chinese fallback. Applied at Orchestrator and Rasa
-proxy exits so no unauthorised English reaches the frontend.
+Detects English / mixed IT-helpdesk residue and replaces with a fixed Chinese
+fallback. Applied at Orchestrator exits so no unauthorised English reaches the
+frontend.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ FORBIDDEN_ENGLISH_PHRASES = (
     "I'm having an issue with my email",
     "What's the status of the ticket I opened",
     "What is your email address",
-    "I am a bot, powered by Rasa",
+    "I am a bot",
     "I'm a bot",
     "Could not connect to ServiceNow",
     "ServiceNow error",
@@ -94,14 +94,3 @@ def ensure_chinese_response(
         (text or "")[:120],
     )
     return fallback
-
-
-def sanitize_rasa_messages(messages: list[dict], *, source: str = "rasa") -> list[dict]:
-    """Apply language guard to each Rasa webhook message's text field."""
-    out: list[dict] = []
-    for msg in messages:
-        item = dict(msg)
-        if "text" in item and item["text"]:
-            item["text"] = ensure_chinese_response(item["text"], source=source)
-        out.append(item)
-    return out

@@ -23,20 +23,15 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models import (
-    AiSuggestionModel,
-    AppealModel,
     FollowUpTaskModel,
     NotificationModel,
     NotificationOutboxModel,
-    PhoneFollowUpRecordModel,
-    TicketModel,
-    UserModel,
 )
 from app.worker import scan_due_soon, process_outbox
 
 
 API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
-SEED_PASSWORD = os.environ.get("SEED_PASSWORD", "tingting-seed-demo-2026")
+SEED_PASSWORD = os.environ["SEED_PASSWORD"]
 
 PASS = []
 FAIL = []
@@ -219,12 +214,16 @@ def loop3_sla_notification(citizen_token, agent_token, dept_token, db):
     db.commit()
 
     created = scan_due_soon(db)
-    step("scan_due_soon", created > 0, f"created={created} outbox items")
+    queued = db.scalar(select(NotificationOutboxModel.id).where(
+        NotificationOutboxModel.ticket_id == tid, NotificationOutboxModel.event_type == "ticket_due_soon",
+    ).limit(1))
+    step("scan_due_soon", queued is not None, f"created={created}; target event present={queued is not None}")
 
     delivered = process_outbox(db)
-    step("process_outbox", delivered > 0, f"delivered={delivered}")
-
-    notifs = list(db.scalars(select(NotificationModel).where(NotificationModel.ticket_id == tid)).all())
+    notifs = list(db.scalars(select(NotificationModel).where(
+        NotificationModel.ticket_id == tid, NotificationModel.event_type == "ticket_due_soon",
+    )).all())
+    step("process_outbox", bool(notifs), f"delivered={delivered}; target notifications={len(notifs)}")
     step("notification_persisted", len(notifs) > 0, f"count={len(notifs)}")
     return len(notifs) > 0
 

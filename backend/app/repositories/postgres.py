@@ -1,12 +1,15 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, func, or_, select, text, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..authorization import AuthorizationPolicy, Principal
-from ..models import TicketFeedbackModel, TicketModel, TicketStatusHistoryModel
-from ..schemas import TicketQuery
+from ..config import get_settings
+from ..models import CategoryModel, TicketFeedbackModel, TicketModel, TicketStatusHistoryModel, WorkOrderHistoryModel, WorkOrderModel
+from ..schemas import TicketFilterQuery, TicketQuery
 from .base import CreateResult, PageResult, TicketRepository
 
 
@@ -53,7 +56,7 @@ class PostgreSQLTicketRepository(TicketRepository):
     def get(self, ticket_id: str):
         return self.db.scalar(select(TicketModel).where(TicketModel.ticket_id == ticket_id.upper()))
 
-    def _filtered(self, query: TicketQuery, principal: Principal):
+    def _filtered(self, query: TicketFilterQuery, principal: Principal):
         statement = AuthorizationPolicy.apply_query_scope(select(TicketModel), principal)
         if query.status:
             statement = statement.where(TicketModel.status == query.status)
@@ -84,20 +87,39 @@ class PostgreSQLTicketRepository(TicketRepository):
             statement = statement.where(mine_column == principal.user_id)
         if query.my_department:
             statement = statement.where(TicketModel.assigned_department_id == principal.department_id)
+        if query.work_queue == "awaiting_review":
+            statement = statement.where(TicketModel.collaboration_status == "awaiting_review")
+        elif query.work_queue == "returned":
+            returned = WorkOrderModel.status == "returned"
+            reviewer_return = and_(
+                WorkOrderModel.status == "processing", WorkOrderModel.task_type == "primary",
+                WorkOrderModel.history.any(and_(
+                    WorkOrderHistoryModel.action == "return_to_department",
+                    WorkOrderHistoryModel.created_at >= func.coalesce(WorkOrderModel.accepted_at, WorkOrderModel.created_at),
+                )),
+            )
+            if principal.role == "department_staff":
+                reviewer_return = and_(reviewer_return, WorkOrderModel.department_id == principal.department_id)
+            statement = statement.where(or_(
+                and_(TicketModel.collaboration_status == "awaiting_dispatch", TicketModel.work_orders.any(returned)),
+                and_(TicketModel.collaboration_status == "in_progress", TicketModel.work_orders.any(reviewer_return)),
+            ))
         if query.sla_state:
             now = func.now()
             deadline = case((TicketModel.status == "pending", TicketModel.accept_due_at), else_=TicketModel.resolve_due_at)
+            is_open = TicketModel.status.in_(("pending", "accepted", "assigned", "processing"))
+            threshold = now + timedelta(hours=get_settings().worker_due_soon_hours)
             if query.sla_state == "paused":
-                statement = statement.where(TicketModel.sla_paused_at.is_not(None))
+                statement = statement.where(is_open, TicketModel.sla_paused_at.is_not(None))
             elif query.sla_state == "overdue":
-                statement = statement.where(TicketModel.sla_paused_at.is_(None), deadline < now,
-                                            TicketModel.status.notin_(("resolved", "closed", "rejected")))
+                statement = statement.where(is_open, TicketModel.sla_paused_at.is_(None), deadline < now)
             elif query.sla_state == "due_soon":
-                statement = statement.where(TicketModel.sla_paused_at.is_(None), deadline >= now,
-                                            deadline <= now + text("INTERVAL '4 hours'"),
-                                            TicketModel.status.notin_(("resolved", "closed", "rejected")))
+                statement = statement.where(is_open, TicketModel.sla_paused_at.is_(None), deadline.between(now, threshold))
             else:
-                statement = statement.where(TicketModel.sla_paused_at.is_(None), deadline > now + text("INTERVAL '4 hours'"))
+                statement = statement.where(or_(
+                    ~is_open,
+                    and_(TicketModel.sla_paused_at.is_(None), or_(deadline.is_(None), deadline > threshold)),
+                ))
         return statement
 
     def list(self, query: TicketQuery, principal: Principal) -> PageResult:
@@ -109,8 +131,36 @@ class PostgreSQLTicketRepository(TicketRepository):
             "priority": case({"normal": 1, "expedited": 2, "urgent": 3, "major": 4}, value=TicketModel.priority),
         }[query.sort]
         order = order_column.asc() if query.order == "asc" else order_column.desc()
-        statement = filtered.order_by(order, TicketModel.id.desc()).offset((query.page - 1) * query.page_size).limit(query.page_size)
+        statement = (
+            filtered.options(
+                joinedload(TicketModel.creator), joinedload(TicketModel.assignee),
+                joinedload(TicketModel.department),
+                joinedload(TicketModel.category).joinedload(CategoryModel.parent).joinedload(CategoryModel.parent),
+            )
+            .order_by(order, TicketModel.id.desc())
+            .offset((query.page - 1) * query.page_size)
+            .limit(query.page_size)
+        )
         return PageResult(list(self.db.scalars(statement).all()), total)
+
+    def list_for_export(self, query: TicketFilterQuery, principal: Principal, *, limit: int = 5000) -> list[TicketModel]:
+        filtered = self._filtered(query, principal)
+        order_column = {
+            "created_at": TicketModel.created_at,
+            "updated_at": TicketModel.updated_at,
+            "priority": case({"normal": 1, "expedited": 2, "urgent": 3, "major": 4}, value=TicketModel.priority),
+        }[query.sort]
+        order = order_column.asc() if query.order == "asc" else order_column.desc()
+        statement = (
+            filtered.options(
+                joinedload(TicketModel.creator), joinedload(TicketModel.assignee),
+                joinedload(TicketModel.department),
+                joinedload(TicketModel.category).joinedload(CategoryModel.parent).joinedload(CategoryModel.parent),
+            )
+            .order_by(order, TicketModel.id.desc())
+            .limit(limit)
+        )
+        return list(self.db.scalars(statement).all())
 
     def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates,
                    visibility="internal", *, commit: bool = True):

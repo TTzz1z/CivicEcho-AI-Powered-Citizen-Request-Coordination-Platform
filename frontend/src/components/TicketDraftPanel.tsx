@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Alert, Button, Card, Descriptions, Divider, Input, Select, Space, Tag, Typography, message } from 'antd'
 import { CheckCircleOutlined, EditOutlined, FileTextOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation } from '@tanstack/react-query'
@@ -35,6 +35,7 @@ export function TicketDraftPanel({ draft, missing, onChange, onSubmitted }: Prop
   const [normalized, setNormalized] = useState('')
   const [useNormalized, setUseNormalized] = useState(false)
   const [submittedId, setSubmittedId] = useState<string | null>(null)
+  const lastSubmission = useRef<{ payload: string; key: string }>()
 
   const set = (field: keyof DraftState, value: string) => onChange({ ...draft, [field]: value })
 
@@ -60,16 +61,20 @@ export function TicketDraftPanel({ draft, missing, onChange, onSubmitted }: Prop
   })
 
   const submit = useMutation({
-    mutationFn: () => createTicket({
-      idempotency_key: `chat-draft-${user?.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      request_type: draft.request_type || '投诉',
-      description: useNormalized && normalized ? normalized : (draft.description || ''),
-      location: draft.location || '未提供',
-      occurred_at_text: draft.occurred_at_text || undefined,
-      target: draft.target || undefined,
-      contact: draft.contact || undefined,
-      source: 'rasa-chat-draft',
-    }),
+    mutationFn: () => {
+      const fields = {
+        request_type: draft.request_type || '投诉',
+        description: useNormalized && normalized ? normalized : (draft.description || ''),
+        location: draft.location || '未提供',
+        occurred_at_text: draft.occurred_at_text || undefined,
+        target: draft.target || undefined,
+        contact: draft.contact || undefined,
+        source: 'orchestrator-chat-draft',
+      }
+      const payload = JSON.stringify(fields)
+      if (lastSubmission.current?.payload !== payload) lastSubmission.current = { payload, key: `chat-draft-${crypto.randomUUID()}` }
+      return createTicket({ ...fields, idempotency_key: lastSubmission.current.key })
+    },
     onSuccess: (data) => {
       setSubmittedId(data.ticket.ticket_id)
       onSubmitted(data.ticket.ticket_id)
@@ -91,27 +96,27 @@ export function TicketDraftPanel({ draft, missing, onChange, onSubmitted }: Prop
     { key: 'contact', label: '联系方式', required: false, placeholder: '手机号（已登录可跳过）' },
   ]
 
-  return <Card className="surface draft-panel" title={<Space><FileTextOutlined />工单草稿</Space>} extra={isValid ? <Tag color="green">可提交</Tag> : <Tag color="orange">待补全</Tag>}>
+  return <Card className="surface draft-panel" title={<Space><FileTextOutlined aria-hidden />工单草稿</Space>} extra={isValid ? <Tag color="green">可提交</Tag> : <Tag color="orange">待补全</Tag>}>
     {user?.role === 'citizen' && <Alert type="info" showIcon message="已绑定市民账号，联系方式可留空" style={{ marginBottom: 12 }} />}
-    <Descriptions size="small" column={1} items={fieldConfig.map(f => ({
+    <Descriptions size="small" column={1} layout="vertical" colon={false} items={fieldConfig.map(f => ({
       key: f.key,
-      label: <Space>{f.label}{f.required && <span style={{ color: '#ff4d4f' }}>*</span>}{errors[f.key] && <Typography.Text type="danger" style={{ fontSize: 12 }}>{errors[f.key]}</Typography.Text>}</Space>,
+      label: <Space wrap>{f.label}{f.required && <span className="draft-required" aria-label="必填">*</span>}{errors[f.key] && <Typography.Text type="danger" className="draft-error">{errors[f.key]}</Typography.Text>}</Space>,
       children: editing === f.key
         ? (f.key === 'request_type'
-          ? <Select size="small" autoFocus style={{ width: '100%' }} value={draft[f.key]} options={REQUEST_TYPES.map(t => ({ value: t, label: t }))} onChange={v => { set(f.key, v); setEditing(null) }} onBlur={() => setEditing(null)} />
+          ? <Select aria-label={f.label} size="small" autoFocus style={{ width: '100%' }} value={draft[f.key]} options={REQUEST_TYPES.map(t => ({ value: t, label: t }))} onChange={v => { set(f.key, v); setEditing(null) }} onBlur={() => setEditing(null)} />
           : f.key === 'description'
-          ? <TextArea size="small" autoFocus rows={3} defaultValue={draft[f.key]} onBlur={e => { set(f.key, e.target.value); setEditing(null) }} />
-          : <Input size="small" autoFocus defaultValue={draft[f.key]} placeholder={f.placeholder} onPressEnter={e => { set(f.key, (e.target as HTMLInputElement).value); setEditing(null) }} onBlur={e => { set(f.key, e.target.value); setEditing(null) }} />)
+          ? <TextArea aria-label={f.label} size="small" autoFocus rows={3} defaultValue={draft[f.key]} onBlur={e => { set(f.key, e.target.value); setEditing(null) }} />
+          : <Input aria-label={f.label} size="small" autoFocus defaultValue={draft[f.key]} placeholder={f.placeholder} onPressEnter={e => { if (!e.nativeEvent.isComposing) { set(f.key, (e.target as HTMLInputElement).value); setEditing(null) } }} onBlur={e => { set(f.key, e.target.value); setEditing(null) }} />)
         : <Space>
             <span>{draft[f.key] || <Typography.Text type="secondary">{missing.includes(f.key) ? '待补充' : '—'}</Typography.Text>}</span>
-            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(f.key)} />
+            <Button aria-label={`编辑${f.label}`} size="small" type="text" icon={<EditOutlined aria-hidden />} onClick={() => setEditing(f.key)} />
           </Space>,
     }))} />
 
     <Divider style={{ margin: '12px 0' }} />
     <Typography.Text strong style={{ fontSize: 13 }}>规范化描述</Typography.Text>
     <div style={{ marginTop: 6 }}>
-      {normalized ? <Typography.Paragraph style={{ fontSize: 13, background: '#f6f9f8', padding: 8, borderRadius: 6 }}>{normalized}</Typography.Paragraph> : <Typography.Text type="secondary" style={{ fontSize: 12 }}>点击"生成规范描述"由 AI 整理为正式工单文本</Typography.Text>}
+      {normalized ? <Typography.Paragraph style={{ fontSize: 13, background: '#fafafb', border: '1px solid var(--ce-line)', padding: 10, borderRadius: 8 }}>{normalized}</Typography.Paragraph> : <Typography.Text type="secondary" style={{ fontSize: 12 }}>点击"生成规范描述"由 AI 整理为正式工单文本</Typography.Text>}
       <Space style={{ marginTop: 6 }} wrap>
         <Button size="small" loading={normalize.isPending} onClick={() => normalize.mutate()}>生成规范描述</Button>
         {normalized && <Button size="small" type={useNormalized ? 'primary' : 'default'} onClick={() => setUseNormalized(true)}>使用此版本</Button>}

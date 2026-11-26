@@ -1,19 +1,39 @@
 name: tingting-assistant
 
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-storage-environment: &storage-environment
+  OBJECT_STORAGE_ENDPOINT: "${OBJECT_STORAGE_ENDPOINT:-minio:9000}"
+  OBJECT_STORAGE_ACCESS_KEY: "${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}"
+  OBJECT_STORAGE_SECRET_KEY: "${OBJECT_STORAGE_SECRET_KEY:-minioadmin}"
+  OBJECT_STORAGE_BUCKET: "${OBJECT_STORAGE_BUCKET:-tingting-attachments}"
+  OBJECT_STORAGE_SECURE: "${OBJECT_STORAGE_SECURE:-false}"
+  OBJECT_STORAGE_REGION: "${OBJECT_STORAGE_REGION:-}"
+  OBJECT_STORAGE_TIMEOUT_SECONDS: "${OBJECT_STORAGE_TIMEOUT_SECONDS:-5}"
+  KB_UPLOAD_BUCKET: "${KB_UPLOAD_BUCKET:-tingting-kb}"
+
 services:
   frontend:
+    <<: *service-defaults
+    cpus: "${FRONTEND_CPU_LIMIT:-1.0}"
+    mem_limit: "${FRONTEND_MEMORY_LIMIT:-256m}"
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_DEMO_MODE: "${VITE_DEMO_MODE:-true}"
     environment:
       BACKEND_UPSTREAM: "${FRONTEND_BACKEND_UPSTREAM:-http://backend:8000}"
-      RASA_UPSTREAM: "${FRONTEND_RASA_UPSTREAM:-http://rasa:5005}"
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-8080}:80"
     depends_on:
       backend:
-        condition: service_healthy
-      rasa:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
@@ -22,6 +42,9 @@ services:
       retries: 10
 
   postgres:
+    <<: *service-defaults
+    cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-1024m}"
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-tingting}"
@@ -36,6 +59,9 @@ services:
       retries: 20
 
   minio:
+    <<: *service-defaults
+    cpus: "${LEGACY_MINIO_CPU_LIMIT:-1.0}"
+    mem_limit: "${LEGACY_MINIO_MEMORY_LIMIT:-512m}"
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -44,19 +70,23 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${LOCAL_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/live HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && IFS= read -r line <&3 && [[ \"$$line\" == *200* ]]"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   backend:
+    <<: *service-defaults
+    cpus: "${BACKEND_CPU_LIMIT:-2.0}"
+    mem_limit: "${BACKEND_MEMORY_LIMIT:-1536m}"
     build:
       context: .
       dockerfile: Dockerfile.backend
     environment:
+      <<: *storage-environment
       DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-tingting}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tingting}"
       JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in .env}"
       JWT_ACCESS_TOKEN_MINUTES: "${JWT_ACCESS_TOKEN_MINUTES:-30}"
@@ -66,16 +96,23 @@ services:
       DATABASE_CONNECT_TIMEOUT_SECONDS: "${DATABASE_CONNECT_TIMEOUT_SECONDS:-5}"
       LOGIN_RATE_LIMIT_ATTEMPTS: "${LOGIN_RATE_LIMIT_ATTEMPTS:-5}"
       LOGIN_RATE_LIMIT_WINDOW_SECONDS: "${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}"
+      ALLOW_CITIZEN_SELF_REGISTER: "${ALLOW_CITIZEN_SELF_REGISTER:-true}"
+      REGISTER_RATE_LIMIT_ATTEMPTS: "${REGISTER_RATE_LIMIT_ATTEMPTS:-10}"
+      REGISTER_RATE_LIMIT_WINDOW_SECONDS: "${REGISTER_RATE_LIMIT_WINDOW_SECONDS:-300}"
+      ANON_TICKET_RATE_LIMIT_ATTEMPTS: "${ANON_TICKET_RATE_LIMIT_ATTEMPTS:-15}"
+      ANON_TICKET_RATE_LIMIT_WINDOW_SECONDS: "${ANON_TICKET_RATE_LIMIT_WINDOW_SECONDS:-300}"
+      UPLOAD_RATE_LIMIT_ATTEMPTS: "${UPLOAD_RATE_LIMIT_ATTEMPTS:-30}"
+      UPLOAD_RATE_LIMIT_WINDOW_SECONDS: "${UPLOAD_RATE_LIMIT_WINDOW_SECONDS:-60}"
+      AI_RATE_LIMIT_ATTEMPTS: "${AI_RATE_LIMIT_ATTEMPTS:-30}"
+      AI_RATE_LIMIT_WINDOW_SECONDS: "${AI_RATE_LIMIT_WINDOW_SECONDS:-60}"
+      EXPORT_RATE_LIMIT_ATTEMPTS: "${EXPORT_RATE_LIMIT_ATTEMPTS:-10}"
+      EXPORT_RATE_LIMIT_WINDOW_SECONDS: "${EXPORT_RATE_LIMIT_WINDOW_SECONDS:-60}"
+      WORKER_DUE_SOON_HOURS: "${WORKER_DUE_SOON_HOURS:-4}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       SERVICE_API_TOKEN: "${SERVICE_API_TOKEN:?Set SERVICE_API_TOKEN in .env}"
       DEFAULT_TIMEZONE: "${DEFAULT_TIMEZONE:-Asia/Shanghai}"
       ATTACHMENT_MAX_BYTES: "${ATTACHMENT_MAX_BYTES:-20971520}"
       ATTACHMENT_IMAGE_MAX_BYTES: "${ATTACHMENT_IMAGE_MAX_BYTES:-10485760}"
-      OBJECT_STORAGE_ENDPOINT: "${OBJECT_STORAGE_ENDPOINT:-minio:9000}"
-      OBJECT_STORAGE_ACCESS_KEY: "${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}"
-      OBJECT_STORAGE_SECRET_KEY: "${OBJECT_STORAGE_SECRET_KEY:-minioadmin}"
-      OBJECT_STORAGE_BUCKET: "${OBJECT_STORAGE_BUCKET:-tingting-attachments}"
-      OBJECT_STORAGE_SECURE: "${OBJECT_STORAGE_SECURE:-false}"
       MALWARE_SCAN_MODE: "${MALWARE_SCAN_MODE:-disabled}"
       MALWARE_SCAN_URL: "${MALWARE_SCAN_URL:-}"
       MALWARE_SCAN_TOKEN: "${MALWARE_SCAN_TOKEN:-}"
@@ -96,8 +133,8 @@ services:
       KB_CHUNK_SIZE: "${KB_CHUNK_SIZE:-500}"
       KB_CHUNK_OVERLAP: "${KB_CHUNK_OVERLAP:-100}"
       KB_RAG_TOP_K: "${KB_RAG_TOP_K:-5}"
-      KB_UPLOAD_BUCKET: "${KB_UPLOAD_BUCKET:-tingting-kb}"
-      RASA_WEBHOOK_URL: "${RASA_WEBHOOK_URL:-http://rasa:5005/webhooks/rest/webhook}"
+      KB_RAG_MIN_LEXICAL_COVERAGE: "${KB_RAG_MIN_LEXICAL_COVERAGE:-0.22}"
+      KB_RAG_MIN_VECTOR_SIMILARITY: "${KB_RAG_MIN_VECTOR_SIMILARITY:-0.62}"
       KB_ALLOW_DIRECT_PUBLISH: "${KB_ALLOW_DIRECT_PUBLISH:-true}"
       INTEGRATION_TIMEOUT_SECONDS: "${INTEGRATION_TIMEOUT_SECONDS:-10}"
       OIDC_ENABLED: "${OIDC_ENABLED:-false}"
@@ -121,6 +158,8 @@ services:
       CENTRAL_LOG_TOKEN: "${CENTRAL_LOG_TOKEN:-}"
       MONITORING_ENDPOINT: "${MONITORING_ENDPOINT:-}"
       MONITORING_TOKEN: "${MONITORING_TOKEN:-}"
+      OTEL_SERVICE_NAME: civicecho-backend
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}"
     ports:
       # Local-only: /metrics and the API must not be LAN/WAN reachable by default.
       # In-cluster healthchecks use backend:8000; prod override clears host ports.
@@ -137,94 +176,38 @@ services:
       retries: 20
       start_period: 5s
 
-  duckling:
-    image: rasa/duckling:0.2.0.2@sha256:19db902ea05d88b62c311ba0694623c562d6e28aea3f31b5e3b0d6c87f00bc21
-    ports:
-      - "${DUCKLING_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8000"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-
-  action_server:
-    build:
-      context: .
-      dockerfile: Dockerfile.actions
-    environment:
-      TICKET_BACKEND_MODE: "${TICKET_BACKEND_MODE:-http}"
-      TICKET_SERVICE_URL: "${TICKET_SERVICE_URL:-http://backend:8000}"
-      TICKET_SERVICE_TIMEOUT_SECONDS: "${TICKET_SERVICE_TIMEOUT_SECONDS:-5}"
-      TICKET_SERVICE_TOKEN: "${SERVICE_API_TOKEN:?Set SERVICE_API_TOKEN in .env}"
-      SERVICENOW_LOCAL_MODE: "${SERVICENOW_LOCAL_MODE:-true}"
-      SERVICENOW_INSTANCE: "${SERVICENOW_INSTANCE:-}"
-      SERVICENOW_USER: "${SERVICENOW_USER:-}"
-      SERVICENOW_PASSWORD: "${SERVICENOW_PASSWORD:-}"
-      SERVICENOW_TIMEOUT_SECONDS: "${SERVICENOW_TIMEOUT_SECONDS:-10}"
-      HANDOFF_HOST_KEY: "${HANDOFF_HOST_KEY:-configured_handoff}"
-      HANDOFF_HOST_TITLE: "${HANDOFF_HOST_TITLE:-人工服务}"
-      HANDOFF_HOST_URL: "${HANDOFF_HOST_URL:-}"
-    ports:
-      # This is a service-to-service endpoint.  Do not expose the Rasa SDK's
-      # Sanic CORS layer to the network; developers can still use localhost.
-      - "127.0.0.1:${ACTION_SERVER_PORT:-5055}:5055"
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5055/health', timeout=2)"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 5s
-
-  rasa:
-    image: rasa/rasa:3.6.20-full@sha256:045b8f8f2097ef482671139838079fe94fe132e2ebd62a5808fb6cd589972c75
-    command: ["run", "--enable-api", "--cors", "${RASA_CORS_ORIGIN:-http://localhost:8080}", "--port", "5005", "--model", "/app/models/tingting-v1.3.0.tar.gz"]
-    environment:
-      ACTION_SERVER_URL: "${ACTION_SERVER_URL:-http://action_server:5055/webhook}"
-      DUCKLING_URL: "${DUCKLING_URL:-http://duckling:8000}"
-      RASA_TELEMETRY_ENABLED: "false"
-      RASA_TRACKER_DB_URL: "postgresql://${POSTGRES_USER:-tingting}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tingting}"
-    volumes:
-      - ./:/app
-    ports:
-      - "${RASA_PORT:-5005}:5005"
-    depends_on:
-      action_server:
-        condition: service_healthy
-      duckling:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5005/status', timeout=3)"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-
   worker:
+    <<: *service-defaults
+    cpus: "${WORKER_CPU_LIMIT:-1.0}"
+    mem_limit: "${WORKER_MEMORY_LIMIT:-512m}"
     build:
       context: .
       dockerfile: Dockerfile.backend
     command: ["python", "-m", "app.worker"]
     environment:
+      <<: *storage-environment
       DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-tingting}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tingting}"
       DATABASE_CONNECT_TIMEOUT_SECONDS: "${DATABASE_CONNECT_TIMEOUT_SECONDS:-5}"
       WORKER_ENABLED: "${WORKER_ENABLED:-true}"
       WORKER_SCAN_INTERVAL_SECONDS: "${WORKER_SCAN_INTERVAL_SECONDS:-60}"
+      ANONYMOUS_RETENTION_DAYS: "${ANONYMOUS_RETENTION_DAYS:-30}"
+      OTEL_SERVICE_NAME: civicecho-worker
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}"
       WORKER_DUE_SOON_HOURS: "${WORKER_DUE_SOON_HOURS:-4}"
+      WORKER_OUTBOX_RETENTION_DAYS: "${WORKER_OUTBOX_RETENTION_DAYS:-90}"
+      WORKER_AI_RETENTION_DAYS: "${WORKER_AI_RETENTION_DAYS:-180}"
+      WORKER_ORPHAN_GRACE_DAYS: "${WORKER_ORPHAN_GRACE_DAYS:-7}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       DEFAULT_TIMEZONE: "${DEFAULT_TIMEZONE:-Asia/Shanghai}"
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 10
       start_period: 5s
-    restart: unless-stopped
 
 volumes:
   postgres_data:

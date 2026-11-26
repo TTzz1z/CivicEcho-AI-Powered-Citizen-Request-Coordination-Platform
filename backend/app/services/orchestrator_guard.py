@@ -8,29 +8,28 @@ Design goals:
 - 降级策略：LLM 不可用时 RAG/FAQ/工单/范围提示各自降级
 - 审计：每次模型调用都写入 ai_usage_logs 表，包含 request_id 与各项指标
 
-所有数据结构都进程内安全（threading.Lock 保护）；语义缓存和预算都持久化到
-PostgreSQL（ai_usage_logs / ai_usage_budgets 表），保证多 worker 一致。
+进程内状态由 threading.Lock 保护，不能跨 worker 共享。预算检查读取
+PostgreSQL 使用记录；知识库回答不会从此缓存返回。
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Optional
 
-from sqlalchemy import select, func, and_, text
+from sqlalchemy import select, func, and_
 from sqlalchemy.orm import Session
 
 from ..authorization import Principal
 from ..config import get_settings
 from ..embedding_client import get_embedding_client
-from ..models import AiUsageLogModel, AiUsageBudgetModel
+from ..models import AiUsageLogModel
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,8 @@ class OrchestratorGuard:
         # In-process state
         self._rate_buckets: dict[str, deque[float]] = defaultdict(deque)
         self._dedup_buckets: dict[str, deque[tuple[float, str]]] = defaultdict(deque)
-        self._session_turns: dict[str, int] = defaultdict(int)
+        self._session_turns: dict[str | tuple[str, str], tuple[int, float]] = {}
+        self._next_prune = 0.0
         self._concurrency: dict[str, int] = defaultdict(int)
         self._cache: list[dict] = []  # each: {key, vector, payload, route, ts}
         self._cache_lock = threading.RLock()
@@ -124,7 +124,7 @@ class OrchestratorGuard:
     # ----------------------------------------------------------------
 
     def pre_check(self, *, text: str, user_key: str, route_hint: Optional[str],
-                  session_id: str, requires_llm: bool) -> GuardDecision:
+                  session_id: str | tuple[str, str], requires_llm: bool) -> GuardDecision:
         """Run all pre-flight checks. Returns GuardDecision."""
         # 1. Input length
         if len(text) > self.input_max_chars:
@@ -134,8 +134,8 @@ class OrchestratorGuard:
             )
         # 2. Session turns
         with self._state_lock:
-            turns = self._session_turns.get(session_id, 0)
-            if turns >= self.session_max_turns:
+            turns, expires_at = self._session_turns.get(session_id, (0, 0.0))
+            if expires_at > time.monotonic() and turns >= self.session_max_turns:
                 return GuardDecision(
                     allowed=False,
                     rejection_reason="session_exceeded",
@@ -153,37 +153,6 @@ class OrchestratorGuard:
                     rate_limited=True,
                 )
             bucket.append(now)
-        # 4. Dedup: same text+route within window → return cached if available
-        text_hash = self._hash_text(text)
-        cache_key = f"{user_key}:{route_hint or 'auto'}:{text_hash}"
-        with self._state_lock:
-            dq = self._dedup_buckets[user_key]
-            cutoff = now - self.dedup_window
-            while dq and dq[0][0] < cutoff:
-                dq.popleft()
-            for ts, key in dq:
-                if key == cache_key:
-                    # Dedup hit; return cached if present
-                    cached = self._cache_lookup(cache_key, route_hint)
-                    return GuardDecision(
-                        allowed=True,
-                        rejection_reason="dedup_hit",
-                        cached_result=cached,
-                        cache_key=cache_key,
-                        cache_hit=cached is not None,
-                    )
-            dq.append((now, cache_key))
-        # 5. Semantic cache (for LLM-bound requests only)
-        if requires_llm:
-            cached = self._cache_lookup_semantic(text, route_hint)
-            if cached is not None:
-                return GuardDecision(
-                    allowed=True,
-                    rejection_reason="cache_hit",
-                    cached_result=cached,
-                    cache_key=cache_key,
-                    cache_hit=True,
-                )
         # 6. Concurrency cap (max 1 concurrent LLM call per user)
         if requires_llm:
             with self._state_lock:
@@ -205,7 +174,7 @@ class OrchestratorGuard:
                     degrade_reason=reason,
                     budget_exceeded=(reason == "budget_exceeded"),
                 )
-        return GuardDecision(allowed=True, cache_key=cache_key)
+        return GuardDecision(allowed=True)
 
     def acquire_llm_slot(self, user_key: str) -> bool:
         """Try to acquire a concurrency slot for an LLM call."""
@@ -220,9 +189,16 @@ class OrchestratorGuard:
             if self._concurrency[user_key] > 0:
                 self._concurrency[user_key] -= 1
 
-    def increment_session_turn(self, session_id: str) -> None:
+    def increment_session_turn(self, session_id: str | tuple[str, str]) -> None:
+        now = time.monotonic()
         with self._state_lock:
-            self._session_turns[session_id] += 1
+            if now >= self._next_prune:
+                self._session_turns = {
+                    key: value for key, value in self._session_turns.items() if value[1] > now
+                }
+                self._next_prune = now + 60
+            turns, expires_at = self._session_turns.get(session_id, (0, 0.0))
+            self._session_turns[session_id] = ((turns if expires_at > now else 0) + 1, now + 86400)
 
     def reset_session(self, session_id: str) -> None:
         with self._state_lock:
@@ -250,6 +226,7 @@ class OrchestratorGuard:
                 "vector": vec,
                 "route": route,
                 "route_hint": route_hint,
+                "scope": principal,
                 "payload": payload,
                 "ts": time.time(),
             }
@@ -288,7 +265,9 @@ class OrchestratorGuard:
             best_entry: Optional[dict] = None
             with self._cache_lock:
                 for entry in self._cache:
-                    if entry["ts"] < cutoff:
+                    if entry["ts"] < cutoff or entry.get("scope") != principal:
+                        continue
+                    if route is not None and entry["route"] != route:
                         continue
                     if route_hint and entry.get("route_hint") and entry["route_hint"] != route_hint:
                         continue

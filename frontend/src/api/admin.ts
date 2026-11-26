@@ -1,5 +1,5 @@
-import { api } from './client'
-import type { ApiSuccess, AuditPage, Category, Dashboard, Department, Role, User, UserFilters, UserPage } from '../types'
+import { api, extractDispositionFilename, triggerBlobDownload } from './client'
+import type { ApiSuccess, AuditExportParams, AuditPage, Category, Dashboard, Department, Role, User, UserFilters, UserPage } from '../types'
 export async function listUsers(){const page=(await api.get<ApiSuccess<UserPage>>('/users',{params:{page_size:100}})).data.data;return page.items}
 export async function listUsersPage(filters:UserFilters={}){return (await api.get<ApiSuccess<UserPage>>('/users',{params:filters})).data.data}
 export async function createUser(data:{username:string;password:string;display_name:string;role:Role;department_id?:number;is_active:boolean}){return (await api.post<ApiSuccess<User>>('/users',data)).data.data}
@@ -13,3 +13,11 @@ export async function createCategory(data:{code:string;name:string;parent_id?:nu
 export async function updateCategory(id:number,data:Partial<Omit<Category,'id'|'code'|'level'|'default_department_name'>>){return (await api.patch<ApiSuccess<Category>>(`/categories/${id}`,data)).data.data}
 export async function getDashboard(){return (await api.get<ApiSuccess<Dashboard>>('/admin/dashboard')).data.data}
 export async function getAuditLogs(page=1,pageSize=20,action?:string){return (await api.get<ApiSuccess<AuditPage>>('/admin/audit-logs',{params:{page,page_size:pageSize,action:action||undefined}})).data.data}
+export async function exportAuditLogsCsv(params:AuditExportParams={}){
+  const clean:Record<string,unknown>={}
+  for(const [k,v] of Object.entries(params)){
+    if(v!==undefined&&v!=='')clean[k]=v
+  }
+  const response=await api.get<Blob>('/admin/audit-logs/export',{params:clean,responseType:'blob',timeout:60_000})
+  triggerBlobDownload(response.data,extractDispositionFilename(response.headers['content-disposition'],'audit-logs-export.csv'))
+}

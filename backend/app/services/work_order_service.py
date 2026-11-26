@@ -10,15 +10,17 @@ from ..schemas import TicketResolve, WorkOrderRead
 
 
 ACTIVE_STATUSES = {"pending", "processing", "submitted"}
+FINAL_TICKET_STATUSES = {"resolved", "closed", "rejected"}
 
 
 class WorkOrderService:
     def __init__(self, repository: WorkOrderRepository, departments: DepartmentRepository,
-                 users: UserRepository, audit: AuditRepository):
+                 users: UserRepository, audit: AuditRepository, aftercare=None):
         self.repository = repository
         self.departments = departments
         self.users = users
         self.audit = audit
+        self.aftercare = aftercare
 
     def _commit_unit(self) -> None:
         self.repository.commit()
@@ -27,12 +29,18 @@ class WorkOrderService:
         self.repository.rollback()
 
     @staticmethod
-    def _present(item: WorkOrderModel) -> WorkOrderRead:
-        return WorkOrderRead.model_validate(item).model_copy(update={
+    def _present(item: WorkOrderModel, *, citizen_view: bool = False, published: bool = False) -> WorkOrderRead:
+        order = WorkOrderRead.model_validate(item)
+        updates = {
             "department_name": item.department.name if item.department else None,
             "assignee_name": item.assignee.display_name if item.assignee else None,
-            "history": sorted(item.history, key=lambda value: value.created_at),
-        })
+            "history": sorted(order.history, key=lambda value: value.created_at),
+        }
+        if citizen_view:
+            updates.update(instructions="", internal_note=None, return_reason=None, history=[])
+            if not published:
+                updates.update(result_summary=None, result_measures=None, result_outcome=None, public_content=None)
+        return order.model_copy(update=updates)
 
     def _ticket(self, ticket_id: str, principal: Principal, *, lock: bool = False):
         ticket = self.repository.ticket(ticket_id, for_update=lock)
@@ -40,6 +48,36 @@ class WorkOrderService:
             raise TicketNotFound(ticket_id)
         AuthorizationPolicy.require_view(principal, ticket)
         return ticket
+
+    @staticmethod
+    def _require_open_ticket(ticket) -> None:
+        if ticket.status in FINAL_TICKET_STATUSES:
+            raise BusinessError("WORK_ORDER_NOT_ALLOWED", "已处理或已闭环工单不能修改协同任务", 409)
+
+    def _lock_work_order(self, work_order_id: str, ticket_id: str | None):
+        # All paths acquire the master ticket before modifying its work orders.
+        ticket = self.repository.lock_ticket_for_order(work_order_id, ticket_id)
+        item = self.repository.get(work_order_id, for_update=True) if ticket is not None else None
+        if item is None:
+            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+        return ticket, item
+
+    def _begin_order(self, ticket, item, principal: Principal, remark: str) -> None:
+        item.status = "processing"
+        item.accepted_at = datetime.now(timezone.utc)
+        if principal.role == "department_staff" and item.assignee_user_id is None:
+            item.assignee_user_id = principal.user_id
+        if item.task_type == "primary":
+            if ticket.status in {"assigned", "accepted"}:
+                self.repository.db.add(TicketStatusHistoryModel(
+                    ticket_id=ticket.ticket_id, operator_user_id=principal.user_id,
+                    operation_type="process", content="主办部门开始办理",
+                    previous_status=ticket.status, current_status="processing",
+                    remark=remark, visibility="internal",
+                ))
+            ticket.status = "processing"
+            ticket.assigned_user_id = item.assignee_user_id
+        self.repository.record(item, principal.user_id, "start", "pending", remark)
 
     def _validate_department(self, department_id: int):
         department = self.departments.get(department_id)
@@ -64,18 +102,23 @@ class WorkOrderService:
         )
 
     def list(self, ticket_id: str, principal: Principal) -> list[WorkOrderRead]:
-        self._ticket(ticket_id, principal)
-        return [self._present(item) for item in self.repository.list_for_ticket(ticket_id)]
+        ticket = self._ticket(ticket_id, principal)
+        return [self._present(item, citizen_view=principal.role == "citizen",
+                              published=ticket.status in {"resolved", "closed"})
+                for item in self.repository.list_for_ticket(ticket_id)]
 
     def create(self, ticket_id: str, version: int, task_type: str, department_id: int,
                assignee_user_id: int | None, instructions: str, principal: Principal) -> WorkOrderRead:
         if principal.role not in {"agent", "admin"}:
             raise PermissionDenied("只有坐席或管理员可以创建部门任务")
         ticket = self._ticket(ticket_id, principal, lock=True)
+        self._require_open_ticket(ticket)
         if ticket.version != version:
             raise VersionConflict()
         if ticket.status not in {"accepted", "assigned", "processing"}:
             raise BusinessError("WORK_ORDER_NOT_ALLOWED", "当前主单状态不能创建部门任务", 409)
+        if ticket.collaboration_status == "awaiting_review":
+            raise BusinessError("WORK_ORDER_NOT_ALLOWED", "待审核工单需要退回部门后才能新增任务", 409)
         department = self._validate_department(department_id)
         self._validate_assignee(assignee_user_id, department_id)
         existing = self.repository.list_for_ticket(ticket_id)
@@ -108,6 +151,8 @@ class WorkOrderService:
             self.audit.log(principal, "create_work_order", resource_type="work_order", resource_id=item.id,
                        details={"ticket_id": ticket.ticket_id, "task_type": task_type, "department_id": department_id},
                        commit=False)
+            if task_type == "primary" and self.aftercare:
+                self.aftercare.enqueue("ticket_assigned", ticket)
             self._commit_unit()
         except Exception:
             self._rollback_unit()
@@ -115,16 +160,17 @@ class WorkOrderService:
         return self._present(self.repository.get(item.id))
 
     def assign(self, work_order_id: str, version: int, assignee_user_id: int, remark: str,
-               principal: Principal) -> WorkOrderRead:
-        item = self.repository.get(work_order_id, for_update=True)
-        if not item:
-            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+               principal: Principal, *, ticket_id: str | None = None) -> WorkOrderRead:
+        ticket, item = self._lock_work_order(work_order_id, ticket_id)
         if principal.role not in {"agent", "admin"} and not (
             principal.role == "department_staff" and principal.department_id == item.department_id
         ):
             raise PermissionDenied("无权指定该任务责任人")
+        self._require_open_ticket(ticket)
         if item.version != version:
             raise VersionConflict()
+        if item.status not in {"pending", "processing"}:
+            raise BusinessError("INVALID_WORK_ORDER_STATUS", "当前任务不能更换责任人", 409)
         self._validate_assignee(assignee_user_id, item.department_id)
         previous = item.status
         item.assignee_user_id = assignee_user_id
@@ -140,28 +186,19 @@ class WorkOrderService:
             raise
         return self._present(self.repository.get(item.id))
 
-    def start(self, work_order_id: str, version: int, remark: str, principal: Principal) -> WorkOrderRead:
-        item = self.repository.get(work_order_id, for_update=True)
-        if not item:
-            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+    def start(self, work_order_id: str, version: int, remark: str, principal: Principal,
+              *, ticket_id: str | None = None) -> WorkOrderRead:
+        ticket, item = self._lock_work_order(work_order_id, ticket_id)
         if not self._can_operate(item, principal):
             raise PermissionDenied("无权办理该部门任务")
+        self._require_open_ticket(ticket)
         if item.version != version:
             raise VersionConflict()
         if item.status != "pending":
             raise BusinessError("INVALID_WORK_ORDER_STATUS", "只有待办理任务可以开始处理", 409)
-        previous = item.status
-        item.status = "processing"
-        item.accepted_at = datetime.now(timezone.utc)
-        if principal.role == "department_staff" and item.assignee_user_id is None:
-            item.assignee_user_id = principal.user_id
+        self._begin_order(ticket, item, principal, remark)
         item.version += 1
-        ticket = self.repository.ticket(item.ticket_id, for_update=True)
-        if item.task_type == "primary":
-            ticket.status = "processing"
-            ticket.assigned_user_id = item.assignee_user_id
         ticket.version += 1
-        self.repository.record(item, principal.user_id, "start", previous, remark)
         try:
             self.audit.log(principal, "start_work_order", resource_type="work_order", resource_id=item.id,
                        commit=False)
@@ -171,12 +208,12 @@ class WorkOrderService:
             raise
         return self._present(self.repository.get(item.id))
 
-    def return_to_agent(self, work_order_id: str, version: int, remark: str, principal: Principal) -> WorkOrderRead:
-        item = self.repository.get(work_order_id, for_update=True)
-        if not item:
-            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+    def return_to_agent(self, work_order_id: str, version: int, remark: str, principal: Principal,
+                        *, ticket_id: str | None = None) -> WorkOrderRead:
+        ticket, item = self._lock_work_order(work_order_id, ticket_id)
         if not self._can_operate(item, principal):
             raise PermissionDenied("无权退回该部门任务")
+        self._require_open_ticket(ticket)
         if item.version != version:
             raise VersionConflict()
         if item.status not in {"pending", "processing"}:
@@ -185,7 +222,6 @@ class WorkOrderService:
         item.status = "returned"
         item.return_reason = remark.strip()
         item.version += 1
-        ticket = self.repository.ticket(item.ticket_id, for_update=True)
         ticket.collaboration_status = "awaiting_dispatch"
         ticket.dispatch_return_reason = remark.strip()
         if item.task_type == "primary":
@@ -205,12 +241,12 @@ class WorkOrderService:
         return self._present(self.repository.get(item.id))
 
     def transfer(self, work_order_id: str, version: int, target_department_id: int,
-                 assignee_user_id: int | None, remark: str, principal: Principal) -> WorkOrderRead:
-        item = self.repository.get(work_order_id, for_update=True)
-        if not item:
-            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+                 assignee_user_id: int | None, remark: str, principal: Principal,
+                 *, ticket_id: str | None = None) -> WorkOrderRead:
+        ticket, item = self._lock_work_order(work_order_id, ticket_id)
         if not self._can_operate(item, principal):
             raise PermissionDenied("无权转派该部门任务")
+        self._require_open_ticket(ticket)
         if item.version != version:
             raise VersionConflict()
         if item.status not in {"pending", "processing"}:
@@ -232,7 +268,6 @@ class WorkOrderService:
             created_by_user_id=principal.user_id,
         )
         self.repository.add(successor, principal.user_id, "transfer_in", successor.instructions)
-        ticket = self.repository.ticket(item.ticket_id, for_update=True)
         if item.task_type == "primary":
             ticket.assigned_department_id = target_department_id
             ticket.assigned_user_id = assignee_user_id
@@ -251,16 +286,18 @@ class WorkOrderService:
 
     def submit(self, work_order_id: str, version: int, remark: str, result_summary: str,
                result_measures: str, result_outcome: str, public_content: str,
-               internal_note: str | None, principal: Principal) -> WorkOrderRead:
-        item = self.repository.get(work_order_id, for_update=True)
-        if not item:
-            raise BusinessError("WORK_ORDER_NOT_FOUND", "部门任务不存在", 404)
+               internal_note: str | None, principal: Principal,
+               *, ticket_id: str | None = None) -> WorkOrderRead:
+        ticket, item = self._lock_work_order(work_order_id, ticket_id)
         if not self._can_operate(item, principal):
             raise PermissionDenied("无权提交该部门任务结果")
+        self._require_open_ticket(ticket)
         if item.version != version:
             raise VersionConflict()
         if item.status not in {"pending", "processing"}:
             raise BusinessError("INVALID_WORK_ORDER_STATUS", "当前任务不能提交结果", 409)
+        if item.status == "pending":
+            self._begin_order(ticket, item, principal, remark)
         previous = item.status
         item.status = "submitted"
         item.result_summary = result_summary.strip()
@@ -271,11 +308,10 @@ class WorkOrderService:
         item.submitted_at = datetime.now(timezone.utc)
         item.version += 1
         self.repository.record(item, principal.user_id, "submit_result", previous, remark)
-        ticket = self.repository.ticket(item.ticket_id, for_update=True)
         ticket.version += 1
         active = [x for x in self.repository.list_for_ticket(item.ticket_id) if x.status not in {"returned", "transferred", "cancelled"}]
         if (active and all(x.status == "submitted" for x in active)
-                and ticket.collaboration_status != "awaiting_dispatch"):
+                and ticket.collaboration_status not in {"disputed", "awaiting_dispatch"}):
             ticket.collaboration_status = "awaiting_summary"
         try:
             self.audit.log(principal, "submit_work_order_result", resource_type="work_order", resource_id=item.id,
@@ -295,8 +331,6 @@ class WorkOrderService:
         agent calls review_and_resolve (or admin fallback).
         """
         ticket = self._ticket(ticket_id, principal, lock=True)
-        if ticket.version != payload.version:
-            raise VersionConflict()
         orders = [x for x in self.repository.list_for_ticket(ticket_id) if x.status not in {"returned", "transferred", "cancelled"}]
         primary = next((x for x in orders if x.task_type == "primary"), None)
         if principal.role != "admin" and not (
@@ -304,28 +338,27 @@ class WorkOrderService:
             and (primary.assignee_user_id is None or primary.assignee_user_id == principal.user_id)
         ):
             raise PermissionDenied("只有主办部门责任人可以汇总最终答复")
+        if ticket.version != payload.version:
+            raise VersionConflict()
         if not primary or any(x.status != "submitted" for x in orders):
             raise BusinessError("WORK_ORDERS_NOT_READY", "所有有效主办、协办和复核任务提交后才能汇总", 409)
         if ticket.status not in {"assigned", "processing"}:
             raise BusinessError("INVALID_STATUS_TRANSITION", "当前主单不能汇总答复", 409)
         if ticket.collaboration_status == "awaiting_review":
             raise BusinessError("ALREADY_AWAITING_REVIEW", "工单已提交待审核，请等待坐席审核", 409)
-        now = datetime.now(timezone.utc)
+        if ticket.collaboration_status in {"disputed", "awaiting_dispatch"}:
+            raise BusinessError("WORK_ORDER_NOT_ALLOWED", "请先完成任务归属协调或重新派发", 409)
         previous = ticket.status
-        # P0-A: master ticket stays in processing; only collaboration_status advances.
+        # Older submissions may be awaiting summary without having advanced the master.
+        ticket.status = "processing"
         ticket.collaboration_status = "awaiting_review"
-        ticket.resolution_summary = payload.resolution_summary
-        ticket.resolution_measures = payload.resolution_measures
-        ticket.resolution_outcome = payload.resolution_outcome
-        ticket.public_reply = payload.public_reply
-        ticket.internal_note = payload.internal_note
+        ticket.review_draft = payload.model_dump(exclude={"version", "remark"})
         ticket.version += 1
-        primary.completed_at = now
         self.repository.db.add(TicketStatusHistoryModel(
             ticket_id=ticket.ticket_id, operator_user_id=principal.user_id, operation_type="submit_for_review",
-            content=f"主办部门提交答复待坐席审核：{payload.public_reply}",
+            content="主办部门提交答复待坐席审核",
             previous_status=previous, current_status=ticket.status,
-            remark=payload.remark, visibility="public",
+            remark=payload.remark, visibility="internal",
         ))
         try:
             self.audit.log(principal, "submit_for_review", resource_type="ticket", resource_id=ticket.ticket_id,
@@ -370,6 +403,7 @@ class WorkOrderService:
         ticket.resolution_outcome = payload.resolution_outcome
         ticket.public_reply = payload.public_reply
         ticket.internal_note = payload.internal_note
+        ticket.review_draft = None
         ticket.resolved_at = now
         ticket.version += 1
         primary.completed_at = now
@@ -384,6 +418,8 @@ class WorkOrderService:
             self.audit.log(principal, "review_and_resolve", resource_type="ticket", resource_id=ticket.ticket_id,
                        details={"work_order_count": len(orders)},
                        commit=False)
+            if self.aftercare:
+                self.aftercare.enqueue("resolved", ticket, principal=principal)
             self._commit_unit()
         except Exception:
             self._rollback_unit()
@@ -415,6 +451,7 @@ class WorkOrderService:
             raise BusinessError("PRIMARY_WORK_ORDER_REQUIRED", "缺少主办任务，无法退回", 409)
         previous_collab = ticket.collaboration_status
         ticket.collaboration_status = "in_progress"
+        ticket.review_draft = None
         ticket.version += 1
         # Reset primary work order to processing so department can re-submit
         prev_order_status = primary.status
@@ -445,11 +482,14 @@ class WorkOrderService:
         return ticket
 
     def open_dispute(self, ticket_id: str, version: int, reason: str, remark: str, principal: Principal):
-        ticket = self._ticket(ticket_id, principal, lock=True)
-        if ticket.version != version:
-            raise VersionConflict()
         if principal.role not in {"agent", "admin", "department_staff"}:
             raise PermissionDenied("当前角色不能发起归属争议")
+        ticket = self._ticket(ticket_id, principal, lock=True)
+        self._require_open_ticket(ticket)
+        if ticket.version != version:
+            raise VersionConflict()
+        if ticket.collaboration_status in {"disputed", "awaiting_review"}:
+            raise BusinessError("WORK_ORDER_NOT_ALLOWED", "当前协同状态不能发起归属争议", 409)
         ticket.collaboration_status = "disputed"
         ticket.dispute_reason = reason.strip()
         ticket.dispute_resolution = None
@@ -474,6 +514,7 @@ class WorkOrderService:
         if principal.role != "admin":
             raise PermissionDenied("只有管理员可以协调责任归属争议")
         ticket = self._ticket(ticket_id, principal, lock=True)
+        self._require_open_ticket(ticket)
         if ticket.version != version:
             raise VersionConflict()
         if ticket.collaboration_status != "disputed":

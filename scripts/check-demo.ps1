@@ -82,7 +82,7 @@ Invoke-Check 'Docker 服务' '启动 Docker Desktop；执行 docker compose logs
         Invoke-Native { & docker $dockerArgs } | Out-Null
     }
     $rows = @(Invoke-Native { docker compose ps --format json } | ForEach-Object { $_ | ConvertFrom-Json })
-    $expected = @('frontend', 'postgres', 'minio', 'backend', 'duckling', 'action_server', 'rasa', 'worker')
+    $expected = @('frontend', 'postgres', 'minio', 'backend', 'worker')
     foreach ($service in $expected) {
         $row = $rows | Where-Object { $_.Service -eq $service }
         if (-not $row) { throw "$service 未运行；可加 -Start -Build 自动构建启动" }
@@ -93,7 +93,7 @@ Invoke-Check 'Docker 服务' '启动 Docker Desktop；执行 docker compose logs
 Invoke-Check '数据库迁移' '执行 docker compose exec -T backend alembic upgrade head；若失败，检查 DATABASE_URL 与 PostgreSQL 日志。' {
     Invoke-Native { docker compose exec -T backend alembic check } | Out-Null
     $migration = (Invoke-Native { docker compose exec -T backend alembic current }) -join ' '
-    if ($migration -notmatch '0011' -or $migration -notmatch 'head') { throw "迁移版本不是 0011 head：$migration" }
+    if ($migration -notmatch '\(head\)') { throw "数据库迁移未到达 head：$migration" }
 }
 
 Invoke-Check 'Seed 数据' '确认 SEED_PASSWORD 合规，并执行 docker compose exec -T -e SEED_PASSWORD -e SEED_PROFILE=demo backend python -m app.seed。' {
@@ -102,28 +102,14 @@ Invoke-Check 'Seed 数据' '确认 SEED_PASSWORD 合规，并执行 docker compo
 }
 
 $backendPort = Get-ConfigValue 'BACKEND_PORT' '8001'
-$rasaPort = Get-ConfigValue 'RASA_PORT' '5005'
 $frontendPort = Get-ConfigValue 'FRONTEND_PORT' '8080'
 $backendUrl = "http://127.0.0.1:$backendPort"
-$rasaUrl = "http://127.0.0.1:$rasaPort"
 $frontendUrl = "http://127.0.0.1:$frontendPort"
 
 Invoke-Check '登录' '重新执行 Seed，并检查 backend 日志、账号 citizen_local 是否启用以及登录限流设置。' {
     $body = @{ username = 'citizen_local'; password = $script:demoPassword } | ConvertTo-Json
     $login = Invoke-RestMethod -Method Post -Uri "$backendUrl/api/v1/auth/login" -ContentType 'application/json' -Body $body -TimeoutSec 10
     if (-not $login.success -or -not $login.data.access_token) { throw '登录响应中没有 access_token' }
-}
-
-Invoke-Check 'Rasa' '检查 models/tingting-v1.3.0.tar.gz、rasa/action_server/duckling 日志以及 ACTION_SERVER_URL、DUCKLING_URL。' {
-    $status = Invoke-RestMethod -Uri "$rasaUrl/status" -TimeoutSec 10
-    if (-not $status.model_file) { throw 'Rasa 未加载模型' }
-    $sender = 'demo-check-' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $greet = Invoke-RestMethod -Method Post -Uri "$rasaUrl/webhooks/rest/webhook" -ContentType 'application/json' -Body (@{ sender = $sender; message = '你好' } | ConvertTo-Json) -TimeoutSec 30
-    if (@($greet).Count -lt 1) { throw 'Rasa 问候链路没有返回消息' }
-    $queryMessage = '/query_request_status{"ticket_id":"QTDEMO000000000001"}'
-    $query = Invoke-RestMethod -Method Post -Uri "$rasaUrl/webhooks/rest/webhook" -ContentType 'application/json' -Body (@{ sender = $sender; message = $queryMessage } | ConvertTo-Json) -TimeoutSec 30
-    $queryText = (@($query) | ForEach-Object { $_.text }) -join ' '
-    if ($queryText -notmatch 'QTDEMO000000000001') { throw 'Rasa → Action Server → Backend 工单查询链路未返回演示工单' }
 }
 
 Invoke-Check 'Backend' '查看 docker compose logs backend；确认 PostgreSQL healthy、JWT_SECRET 和数据库连接配置正确。' {
@@ -139,5 +125,5 @@ Invoke-Check '健康检查' '执行 docker compose ps 和 docker compose logs --
     if ($unhealthy.Count -gt 0) { throw (($unhealthy | ForEach-Object { "$($_.Service)=$($_.Status)" }) -join ', ') }
 }
 
-Write-Host "`n演示检查完成：$script:passed/8 项通过，八服务 healthy。" -ForegroundColor Green
-Write-Host "Web: $frontendUrl  Backend: $backendUrl/docs  Rasa: $rasaUrl/status"
+Write-Host "`n演示检查完成：$script:passed 项通过。" -ForegroundColor Green
+Write-Host "Web: $frontendUrl  Backend: $backendUrl/docs"

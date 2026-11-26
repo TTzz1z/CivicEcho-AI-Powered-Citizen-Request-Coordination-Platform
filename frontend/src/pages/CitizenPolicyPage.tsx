@@ -6,7 +6,7 @@ export function CitizenPolicyPage() {
     <KbRagPanel
       eyebrow="CITIZEN POLICY RAG"
       title="政策咨询"
-      description="基于公开政策库、办事指南与常见问题为您提供权威解答。每个结论均附政策来源，未检索到依据时不会编造。"
+      description="查询已发布的政策和办事指南，查看回答引用的原文及有效日期。"
       enableFilters={false}
     />
   )

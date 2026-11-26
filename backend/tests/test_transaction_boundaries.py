@@ -265,16 +265,16 @@ def test_outbox_delivery_failure_keeps_item_retryable(actors, monkeypatch):
         ticket_id = ticket.ticket_id
 
         calls = {"n": 0}
-        original_add = db.add
+        original_execute = db.execute
 
-        def flaky_add(obj):
-            if isinstance(obj, NotificationModel) and obj.ticket_id == ticket_id:
+        def flaky_execute(statement, *args, **kwargs):
+            if getattr(getattr(statement, "table", None), "name", None) == NotificationModel.__tablename__ and statement.is_insert:
                 calls["n"] += 1
                 if calls["n"] == 1:
                     raise RuntimeError("injected outbox delivery failure")
-            return original_add(obj)
+            return original_execute(statement, *args, **kwargs)
 
-        monkeypatch.setattr(db, "add", flaky_add)
+        monkeypatch.setattr(db, "execute", flaky_execute)
         process_outbox(db)
         assert calls["n"] == 1
         db.expire_all()
@@ -286,7 +286,7 @@ def test_outbox_delivery_failure_keeps_item_retryable(actors, monkeypatch):
         assert db.scalar(select(TicketModel.status).where(TicketModel.ticket_id == ticket_id)) == "pending"
 
         # Business ticket untouched; second delivery succeeds.
-        monkeypatch.setattr(db, "add", original_add)
+        monkeypatch.setattr(db, "execute", original_execute)
         item.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         db.commit()
         process_outbox(db)
@@ -499,3 +499,163 @@ def test_ai_review_audit_failure_rolls_back_decision(actors, monkeypatch):
         persisted = db.get(AiSuggestionModel, suggestion_id)
         assert persisted.review_decision is None
         assert persisted.reviewed_at is None
+
+
+
+def test_concurrent_outbox_delivery_is_idempotent(actors):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from sqlalchemy import func
+
+    key = f"pytest-concurrent:{uuid4().hex}"
+    with SessionLocal.begin() as db:
+        db.execute(NotificationOutboxModel.__table__.update().where(
+            NotificationOutboxModel.status == "pending"
+        ).values(next_retry_at=datetime.now(timezone.utc) + timedelta(days=30)))
+        citizen = _load_user(db, actors["users"]["citizen"])
+        db.add(NotificationOutboxModel(
+            id=str(uuid4()), event_type="test", recipient_user_id=citizen.id,
+            channel="in_app", title="test", content="test", status="pending",
+            idempotency_key=key, next_retry_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        ))
+    barrier = Barrier(2)
+    def deliver():
+        with SessionLocal() as db:
+            barrier.wait(timeout=10)
+            return process_outbox(db)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: deliver(), range(2)))
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(NotificationModel).where(NotificationModel.event_key == key)) == 1
+        assert db.scalar(select(NotificationOutboxModel.status).where(NotificationOutboxModel.idempotency_key == key)) == "sent"
+    assert sum(results) >= 1
+
+
+def test_direct_notification_concurrent_insert_is_idempotent(actors):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from sqlalchemy import func
+    key = f"pytest-direct:{uuid4().hex}"
+    barrier = Barrier(2)
+    def emit():
+        with SessionLocal() as db:
+            item = NotificationModel(id=str(uuid4()), recipient_user_id=actors["users"]["citizen"],
+                event_type="test", channel="in_app", title="test", content="test", status="unread",
+                delivery_status="delivered", event_key=key)
+            barrier.wait(timeout=10)
+            NotificationRepository(db).add_missing([item])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: emit(), range(2)))
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(NotificationModel).where(NotificationModel.event_key == key)) == 1
+
+
+def test_resolve_follow_up_failure_rolls_back_ticket_and_outbox(actors, monkeypatch):
+    with SessionLocal() as db:
+        citizen = _load_user(db, actors["users"]["citizen"])
+        agent = _load_user(db, actors["users"]["agent"])
+        staff = _load_user(db, actors["users"]["department_staff"])
+        service, _, aftercare, _ = _services(db)
+        ticket = _create_ticket(service, citizen)
+        accepted = service.accept(ticket.ticket_id, ticket.version, "受理", _principal(agent))
+        assigned = service.assign(accepted.ticket_id, accepted.version, "派发", actors["department_id"], staff.id, _principal(agent))
+        processing = service.process(assigned.ticket_id, assigned.version, "处理", _principal(staff))
+        def fail(_ticket):
+            raise RuntimeError("follow-up failure")
+        monkeypatch.setattr(aftercare, "_ensure_follow_up", fail)
+        with pytest.raises(RuntimeError, match="follow-up failure"):
+            service.resolve(processing.ticket_id, processing.version, "办结", "摘要", "措施", "resolved", "回复", "备注", _principal(_load_user(db, actors["users"]["admin"])))
+        db.expire_all()
+        assert db.scalar(select(TicketModel.status).where(TicketModel.ticket_id == processing.ticket_id)) == "processing"
+        assert not db.scalar(select(NotificationOutboxModel.id).where(
+            NotificationOutboxModel.ticket_id == processing.ticket_id,
+            NotificationOutboxModel.event_type == "processing_completed"))
+
+
+
+
+def test_outbox_trace_continues_request_span(actors):
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from app.telemetry import provider, tracer
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    with SessionLocal() as db:
+        citizen = _load_user(db, actors["users"]["citizen"])
+        service, _, aftercare, _ = _services(db)
+        ticket = _create_ticket(service, citizen)
+        db.execute(NotificationOutboxModel.__table__.update().where(
+            NotificationOutboxModel.status == "pending"
+        ).values(next_retry_at=datetime.now(timezone.utc) + timedelta(days=30)))
+        with tracer.start_as_current_span("request.test") as parent:
+            parent_context = parent.get_span_context()
+            aftercare.enqueue("ticket_accepted", ticket, occurrence=uuid4().hex, recipient_ids={citizen.id})
+            db.commit()
+        process_outbox(db)
+    spans = exporter.get_finished_spans()
+    deliveries = [span for span in spans if span.name == "outbox.deliver" and span.context.trace_id == parent_context.trace_id]
+    assert len(deliveries) == 1
+    assert deliveries[0].parent.span_id == parent_context.span_id
+
+
+def test_ticket_advice_review_audit_failure_rolls_back(actors, monkeypatch):
+    from app.api.kb import AdviceReviewRequest, ticket_advice_review
+    from app.services.kb_service import KnowledgeBaseService
+    with SessionLocal() as db:
+        citizen = _load_user(db, actors["users"]["citizen"])
+        agent = _load_user(db, actors["users"]["agent"])
+        tickets, _, _, _ = _services(db)
+        ticket = _create_ticket(tickets, citizen)
+        item = AiSuggestionModel(id=str(uuid4()), ticket_id=ticket.ticket_id, suggestion_type="ticket_advice",
+            status="completed", risk_level="none", confidence=80, provider="rules", model_name="rules",
+            input_fingerprint=uuid4().hex, result_json='{"ok": true}', generated_by_user_id=agent.id)
+        db.add(item)
+        db.commit()
+        item_id, ticket_id = item.id, ticket.ticket_id
+        kb = KnowledgeBaseService(db)
+        def fail(*args, **kwargs):
+            raise RuntimeError("review audit failure")
+        monkeypatch.setattr(kb.audit, "log", fail)
+        with pytest.raises(RuntimeError, match="review audit failure"):
+            ticket_advice_review(ticket_id, AdviceReviewRequest(advice_id=item_id, decision="adopted"), _principal(agent), kb)
+        db.expire_all()
+        item = db.get(AiSuggestionModel, item_id)
+        assert item.review_decision is None
+        assert item.reviewed_at is None
+        assert db.scalar(select(AuditLogModel.id).where(AuditLogModel.action == "ai_advice_review", AuditLogModel.resource_id == ticket_id)) is None
+
+
+def test_ticket_advice_concurrent_reviews_only_one_succeeds(actors):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from sqlalchemy import func
+    from app.api.kb import AdviceReviewRequest, ticket_advice_review
+    from app.errors import BusinessError
+    from app.services.kb_service import KnowledgeBaseService
+    with SessionLocal() as db:
+        citizen = _load_user(db, actors["users"]["citizen"])
+        agent = _load_user(db, actors["users"]["agent"])
+        principal = _principal(agent)
+        tickets, _, _, _ = _services(db)
+        ticket = _create_ticket(tickets, citizen)
+        item = AiSuggestionModel(id=str(uuid4()), ticket_id=ticket.ticket_id, suggestion_type="ticket_advice",
+            status="completed", risk_level="none", confidence=80, provider="rules", model_name="rules",
+            input_fingerprint=uuid4().hex, result_json='{}', generated_by_user_id=agent.id)
+        db.add(item)
+        db.commit()
+        item_id, ticket_id = item.id, ticket.ticket_id
+    barrier = Barrier(2)
+    def review(decision):
+        with SessionLocal() as db:
+            barrier.wait(timeout=10)
+            try:
+                ticket_advice_review(ticket_id, AdviceReviewRequest(advice_id=item_id, decision=decision), principal, KnowledgeBaseService(db))
+                return "success"
+            except BusinessError as exc:
+                return exc.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(review, ["adopted", "rejected"]))
+    assert sorted(results) == ["ADVICE_ALREADY_REVIEWED", "success"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(AuditLogModel).where(
+            AuditLogModel.action == "ai_advice_review", AuditLogModel.resource_id == ticket_id)) == 1

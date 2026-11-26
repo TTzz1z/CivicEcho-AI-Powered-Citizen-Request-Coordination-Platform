@@ -5,13 +5,19 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ..authorization import AuthorizationPolicy, Principal
+from ..config import get_settings
 from ..errors import BusinessError, PermissionDenied, TicketNotFound, VersionConflict
 from ..repositories.base import CreateResult, TicketRepository
 from ..repositories.identity import AuditRepository, DepartmentRepository, UserRepository
 from ..models import WorkOrderModel
-from ..schemas import STATUS_LABELS, TicketCreate, TicketDetail, TicketList, TicketQuery, TicketRead, TicketStatusHistoryRead, WorkOrderRead
+from ..schemas import (
+    STATUS_LABELS, TicketBatchAssign, TicketBatchAssignFailed, TicketBatchAssignResult,
+    TicketBatchAssignSucceeded, TicketCreate, TicketDetail, TicketFeedbackRead, TicketFilterQuery,
+    TicketLifecycleEvent, TicketList, TicketQuery, TicketRead, TicketStatusHistoryRead,
+)
 from ..security import anonymous_creator_key
 from ..time_normalization import normalize_chinese_time
+from .work_order_service import WorkOrderService
 
 
 logger = logging.getLogger(__name__)
@@ -22,8 +28,15 @@ TRANSITIONS = {
     "accepted": {"assign": "assigned"},
     "assigned": {"process": "processing"},
     "processing": {"note": "processing", "resolve": "resolved"},
-    "resolved": {"close": "closed", "process": "processing"},
+    "resolved": {"close": "closed"},
 }
+
+SLA_PRIORITY_FACTORS = {"normal": 1.0, "expedited": 0.75, "urgent": 0.5, "major": 0.25}
+
+
+def resolution_sla(priority: str, category) -> timedelta:
+    minutes = category.resolve_sla_minutes if category else 4320
+    return timedelta(minutes=max(1, round(minutes * SLA_PRIORITY_FACTORS.get(priority, 1.0))))
 
 
 class TicketService:
@@ -105,8 +118,14 @@ class TicketService:
         anon_key = anonymous_creator_key(data.creator_reference) if principal.kind == "service" else None
         try:
             result = self.repository.create(ticket_id, data, creator_id, anon_key, commit=False)
+            if result.replayed and principal.kind == "service" and principal.username != "legacy-test":
+                AuthorizationPolicy.require_view(principal, result.ticket, anon_key)
+            if result.replayed and principal.kind == "user" and result.ticket.creator_user_id != creator_id:
+                raise PermissionDenied("该幂等键已被占用")
             if not result.replayed:
                 self._audit(principal, "create_ticket", ticket_id=result.ticket.ticket_id, commit=False)
+                if self.aftercare:
+                    self.aftercare.enqueue("ticket_created", result.ticket)
                 self._commit()
                 self._notify("ticket_created", result.ticket, principal)
         except Exception:
@@ -153,11 +172,11 @@ class TicketService:
         remaining = int((deadline - comparison).total_seconds()) if deadline else None
         is_open = ticket.status not in {"resolved", "closed", "rejected"}
         is_overdue = bool(deadline and comparison > deadline and (is_open or completed_at))
-        if ticket.sla_paused_at:
+        if is_open and ticket.sla_paused_at:
             sla_state = "paused"
         elif is_open and is_overdue:
             sla_state = "overdue"
-        elif is_open and remaining is not None and remaining <= 14400:
+        elif is_open and deadline and deadline <= comparison + timedelta(hours=get_settings().worker_due_soon_hours):
             sla_state = "due_soon"
         else:
             sla_state = "on_track"
@@ -167,37 +186,54 @@ class TicketService:
             updates["internal_note"] = None
         elif principal.role == "citizen":
             updates["internal_note"] = None
+            if ticket.status not in {"resolved", "closed"}:
+                updates.update(resolution_summary=None, resolution_measures=None,
+                               resolution_outcome=None, public_reply=None)
         if detail:
             histories = self.repository.history(ticket.ticket_id)
             if principal.kind == "user" and principal.role in {"agent", "department_staff", "admin"}:
-                updates["history"] = histories
+                updates["history"] = [TicketStatusHistoryRead.model_validate(item) for item in histories]
             else:
+                updates["review_draft"] = None
                 public_labels = {
                     "create": "创建工单", "accept": "工单已受理", "assign": "工单已派发",
                     "process": "承办部门开始处理", "note": "承办部门更新办理进度",
                     "resolve": "承办部门已提交处理结果", "close": "工单已办结",
                     "reject": "工单不予受理", "update_contact": "联系方式已更新",
+                    "submit_for_review": "主办部门已提交答复，等待坐席审核",
                 }
                 updates["history"] = [
                     TicketStatusHistoryRead.model_validate(item).model_copy(update={
                         "content": public_labels.get(item.operation_type, "工单状态已更新"),
                         "remark": None,
-                    }) if getattr(item, "visibility", "public") == "internal" else item
+                    }) if getattr(item, "visibility", "public") == "internal" or item.operation_type == "submit_for_review"
+                    else TicketStatusHistoryRead.model_validate(item)
                     for item in histories
                 ]
-            updates["feedbacks"] = self.repository.feedbacks(ticket.ticket_id)
+            updates["feedbacks"] = [
+                TicketFeedbackRead.model_validate(item) for item in self.repository.feedbacks(ticket.ticket_id)
+            ]
+            if principal.kind == "user":
+                updates["aftercare_events"] = [
+                    TicketLifecycleEvent(kind="follow_up", created_at=task.completed_at, handling_round=task.handling_round)
+                    for task in getattr(ticket, "follow_up_tasks", ())
+                    if task.status == "completed" and task.completed_at is not None
+                ] + [
+                    TicketLifecycleEvent(
+                        kind="appeal_rejected" if appeal.status == "rejected" else "appeal_completed",
+                        created_at=appeal.completed_at,
+                    )
+                    for appeal in getattr(ticket, "appeals", ())
+                    if appeal.status in {"rejected", "completed"} and appeal.completed_at is not None
+                ]
             if self.work_orders:
-                presented_orders = []
-                for item in self.work_orders.list_for_ticket(ticket.ticket_id):
-                    order = WorkOrderRead.model_validate(item).model_copy(update={
-                        "department_name": item.department.name if item.department else None,
-                        "assignee_name": item.assignee.display_name if item.assignee else None,
-                        "history": sorted(item.history, key=lambda value: value.created_at),
-                    })
-                    if principal.kind == "service" or principal.role == "citizen":
-                        order = order.model_copy(update={"internal_note": None, "history": []})
-                    presented_orders.append(order)
-                updates["work_orders"] = presented_orders
+                updates["work_orders"] = [
+                    WorkOrderService._present(
+                        item, citizen_view=principal.kind == "service" or principal.role == "citizen",
+                        published=ticket.status in {"resolved", "closed"},
+                    )
+                    for item in self.work_orders.list_for_ticket(ticket.ticket_id)
+                ]
         return data.model_copy(update=updates)
 
     def detail(self, ticket_id: str, principal: Principal | None = None, creator_reference: str | None = None):
@@ -222,6 +258,21 @@ class TicketService:
             items=[self._present(item, principal) for item in result.items],
             page=query.page, page_size=query.page_size, total=result.total,
         )
+
+    def export_tickets(self, query: TicketFilterQuery, principal: Principal, *, limit: int = 5000) -> list[TicketRead]:
+        if principal.kind != "user":
+            raise PermissionDenied()
+        if query.my_department and principal.department_id is None:
+            rows = []
+        else:
+            rows = self.repository.list_for_export(query, principal, limit=limit)
+        items = [self._present(item, principal) for item in rows]
+        self._audit(
+            principal,
+            "export_tickets",
+            details={"count": len(items), "status": query.status, "department_id": query.department_id},
+        )
+        return items
 
     def _transition(self, ticket_id: str, action: str, version: int, remark: str, principal: Principal,
                     updates: dict | None = None, history_content: str | None = None,
@@ -254,9 +305,8 @@ class TicketService:
             values["resolved_at"] = now
         elif action == "close":
             values["closed_at"] = now
-        elif action == "process" and ticket.status == "resolved":
-            values["resolved_at"] = None
         previous_status = ticket.status
+        event = {"accept": "ticket_accepted", "assign": "ticket_assigned", "resolve": "resolved", "close": "closed"}.get(action)
         try:
             updated = self.repository.transition(
                 ticket.ticket_id, version, new_status, action, history_content or remark,
@@ -273,6 +323,8 @@ class TicketService:
                 details={"from": previous_status, "to": new_status},
                 commit=False,
             )
+            if event and self.aftercare:
+                self.aftercare.enqueue(event, updated, principal=principal)
             if commit:
                 self._commit()
         except Exception:
@@ -280,13 +332,12 @@ class TicketService:
                 self._rollback()
             raise
         if run_aftercare and self.aftercare:
-            event = {"accept": "ticket_accepted", "assign": "ticket_assigned", "resolve": "resolved", "close": "closed"}.get(action)
             if event:
                 self._notify(event, updated, principal)
         return self._present(updated, principal)
 
     def accept(self, ticket_id, version, remark, principal, category_id=None, priority="normal"):
-        if priority not in {"normal", "expedited", "urgent", "major"}:
+        if priority not in SLA_PRIORITY_FACTORS:
             raise BusinessError("INVALID_PRIORITY", "优先级值无效", 422)
         ticket = self.get(ticket_id)
         category = None
@@ -296,17 +347,16 @@ class TicketService:
                 raise BusinessError("CATEGORY_UNAVAILABLE", "分类不存在或已停用", 409)
             if self.categories.has_active_children(category.id):
                 raise BusinessError("CATEGORY_NOT_LEAF", "工单必须选择末级分类", 422)
-        factor = {"normal": 1.0, "expedited": 0.75, "urgent": 0.5, "major": 0.25}[priority]
+        factor = SLA_PRIORITY_FACTORS[priority]
         now = datetime.now(timezone.utc)
         accept_minutes = category.accept_sla_minutes if category else 120
-        resolve_minutes = category.resolve_sla_minutes if category else 4320
         updates = {
             "category_id": category_id,
             "priority": priority,
             "priority_confirmed_at": now,
             "priority_confirmed_by": principal.user_id,
             "accept_due_at": ticket.created_at + timedelta(minutes=max(1, round(accept_minutes * factor))),
-            "resolve_due_at": now + timedelta(minutes=max(1, round(resolve_minutes * factor))),
+            "resolve_due_at": now + resolution_sla(priority, category),
         }
         try:
             result = self._transition(
@@ -371,6 +421,118 @@ class TicketService:
             raise
         self._notify("ticket_assigned", self.get(ticket_id), principal)
         return result
+
+    def batch_assign(self, payload: TicketBatchAssign, principal: Principal) -> TicketBatchAssignResult:
+        AuthorizationPolicy.require_roles(principal, "agent", "admin")
+        if not self.departments:
+            raise BusinessError("DEPARTMENT_UNAVAILABLE", "部门服务不可用", 503)
+        department = self.departments.get(payload.department_id)
+        if not department:
+            raise BusinessError("DEPARTMENT_NOT_FOUND", "未找到指定部门", 404)
+        if not department.is_active:
+            raise BusinessError("DEPARTMENT_INACTIVE", "停用部门不能接收新工单", 409)
+        if payload.assigned_user_id is not None:
+            user = self.users.get(payload.assigned_user_id) if self.users else None
+            if (
+                not user
+                or not user.is_active
+                or user.role != "department_staff"
+                or user.department_id != payload.department_id
+            ):
+                raise BusinessError("INVALID_ASSIGNEE", "承办人必须是该部门的启用部门人员", 409)
+
+        remark = (payload.note or "").strip() or "批量派发"
+        succeeded: list[TicketBatchAssignSucceeded] = []
+        failed: list[TicketBatchAssignFailed] = []
+        seen: set[str] = set()
+
+        for raw_id in payload.ticket_ids:
+            tid = raw_id.strip().upper()
+            if not tid:
+                failed.append(TicketBatchAssignFailed(
+                    ticket_id=raw_id,
+                    code="INVALID_TICKET_ID",
+                    message="工单编号不能为空",
+                ))
+                continue
+            if tid in seen:
+                failed.append(TicketBatchAssignFailed(
+                    ticket_id=tid,
+                    code="DUPLICATE_TICKET_ID",
+                    message="同一批次中工单编号重复",
+                ))
+                continue
+            seen.add(tid)
+
+            try:
+                ticket = self.repository.get(tid)
+                if not ticket:
+                    raise TicketNotFound(tid)
+                expected_version = (
+                    payload.versions[tid]
+                    if payload.versions and tid in payload.versions
+                    else ticket.version
+                )
+                updated_dto = self._transition(
+                    tid,
+                    "assign",
+                    expected_version,
+                    remark,
+                    principal,
+                    {
+                        "assigned_department_id": payload.department_id,
+                        "assigned_user_id": payload.assigned_user_id,
+                        "collaboration_status": "in_progress",
+                    },
+                    commit=False,
+                    run_aftercare=False,
+                )
+                work_order_no: str | None = None
+                if self.work_orders:
+                    has_active_primary = any(
+                        item.task_type == "primary" and item.status in {"pending", "processing", "submitted"}
+                        for item in self.work_orders.list_for_ticket(tid)
+                    )
+                    if has_active_primary:
+                        raise BusinessError("PRIMARY_WORK_ORDER_EXISTS", "该工单已存在进行中的主办任务", 409)
+                    item = WorkOrderModel(
+                        id=str(uuid4()),
+                        work_order_no=f"{tid}-M-{uuid4().hex[:8].upper()}",
+                        ticket_id=tid,
+                        task_type="primary",
+                        status="pending",
+                        department_id=payload.department_id,
+                        assignee_user_id=payload.assigned_user_id,
+                        instructions=remark,
+                        created_by_user_id=principal.user_id,
+                    )
+                    self.work_orders.add(item, principal.user_id, "create", remark)
+                    work_order_no = item.work_order_no
+                self._commit()
+                self._notify("ticket_assigned", self.get(tid), principal)
+                succeeded.append(TicketBatchAssignSucceeded(
+                    ticket_id=tid,
+                    status=updated_dto.status,
+                    version=updated_dto.version,
+                    work_order_no=work_order_no,
+                ))
+            except BusinessError as exc:
+                self._rollback()
+                failed.append(TicketBatchAssignFailed(
+                    ticket_id=tid,
+                    code=exc.code,
+                    message=exc.message,
+                ))
+            except Exception:
+                logger.exception("batch_assign failed for ticket %s", tid)
+                self._rollback()
+                failed.append(TicketBatchAssignFailed(
+                    ticket_id=tid,
+                    code="BATCH_ASSIGN_ERROR",
+                    message="批量派发处理失败",
+                ))
+
+        return TicketBatchAssignResult(succeeded=succeeded, failed=failed)
 
     def process(self, ticket_id, version, remark, principal):
         updates = None
@@ -467,6 +629,8 @@ class TicketService:
                 raise VersionConflict()
             self._audit(principal, "request_ticket_supplement", ticket_id=ticket.ticket_id,
                         details={"reason": supplement_reason}, commit=False)
+            if self.aftercare:
+                self.aftercare.enqueue("supplement_required", updated, detail=supplement_reason.strip())
             self._commit()
         except Exception:
             self._rollback()
@@ -553,6 +717,8 @@ class TicketService:
             self._audit(principal, "submit_ticket_feedback", ticket_id=ticket.ticket_id, details={
                 "rating": rating, "result": result,
             }, commit=False)
+            if new_status == "closed" and self.aftercare:
+                self.aftercare.enqueue("closed", updated, principal=principal)
             self._commit()
         except Exception:
             self._rollback()
@@ -569,6 +735,8 @@ class TicketService:
             raise PermissionDenied("无权修改该工单联系方式")
         if ticket.version != version:
             raise VersionConflict()
+        if ticket.status in {"closed", "rejected"}:
+            raise BusinessError("INVALID_STATUS_TRANSITION", "已闭环工单不能修改联系方式", 409)
         try:
             updated = self.repository.transition(
                 ticket.ticket_id, version, ticket.status, "update_contact", remark,
@@ -615,6 +783,8 @@ class TicketService:
         AuthorizationPolicy.require_transition(principal, "resume_sla", ticket)
         if ticket.version != version:
             raise VersionConflict()
+        if ticket.status not in {"accepted", "assigned", "processing"}:
+            raise BusinessError("SLA_RESUME_NOT_ALLOWED", "当前状态不能恢复计时", 409)
         if not ticket.sla_paused_at:
             raise BusinessError("SLA_NOT_PAUSED", "SLA 当前未暂停", 409)
         now = datetime.now(timezone.utc)

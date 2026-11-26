@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderApp } from '../test/render'
 import { IntelligencePage } from './IntelligencePage'
 import { analyzeTicket, reviewSuggestion } from '../api/intelligence'
+import { getTicket, listTickets } from '../api/tickets'
+import type { TicketDetail } from '../types'
 
 const authState = vi.hoisted(() => ({
   user: { id: 2, role: 'agent' as string, display_name: '坐席' },
@@ -15,6 +17,9 @@ vi.mock('antd', async () => {
   return { ...actual, message: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }
 })
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: authState.user }) }))
+vi.mock('../api/tickets', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api/tickets')>(), listTickets: vi.fn(), getTicket: vi.fn(),
+}))
 vi.mock('../api/intelligence', () => ({
   analyzeTicket: vi.fn(),
   listSuggestions: vi.fn().mockResolvedValue([]),
@@ -28,6 +33,10 @@ vi.mock('../api/intelligence', () => ({
 describe('IntelligencePage role split', () => {
   beforeEach(() => {
     authState.user = { id: 2, role: 'agent', display_name: '坐席' }
+    const ticket = { ticket_id: 'QT2026071400000001', status: 'pending', description: '路灯损坏',
+      location: '幸福路', sla_state: 'on_track' } as TicketDetail
+    vi.mocked(listTickets).mockResolvedValue({ items: [ticket], total: 1, page: 1, page_size: 8 })
+    vi.mocked(getTicket).mockResolvedValue(ticket)
     vi.mocked(analyzeTicket).mockResolvedValue([{
       id: 't1',
       ticket_id: 'QT2026071400000001',
@@ -56,7 +65,7 @@ describe('IntelligencePage role split', () => {
     renderApp(<MemoryRouter><IntelligencePage /></MemoryRouter>)
     expect(screen.getByText('智能分诊与派发')).toBeInTheDocument()
     expect(screen.getByText('人机协同边界')).toBeInTheDocument()
-    await userEvent.type(screen.getByLabelText('工单编号'), 'QT2026071400000001')
+    await screen.findByText('市民原始诉求')
     await userEvent.click(screen.getByRole('button', { name: '生成分诊建议' }))
     expect(await screen.findByText('责任部门推荐')).toBeInTheDocument()
     expect(screen.getByText('综合受理')).toBeInTheDocument()
@@ -66,13 +75,13 @@ describe('IntelligencePage role split', () => {
     expect(analyzeTicket).toHaveBeenCalledWith('QT2026071400000001', ['triage_assistant'], 'triage_assistant')
     expect(screen.getByRole('button', { name: '记录为已采纳' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '记录修改后采纳' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '前往工单详情继续办理' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '前往工单详情继续办理' })).toHaveAttribute('href', '/agent/tickets/QT2026071400000001')
     expect(screen.getByText(/采纳仅记审核决策，不会自动派发/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '采纳分派建议' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '同步建议到工单详情' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '有帮助' })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '有帮助' }))
-    await waitFor(() => expect(reviewSuggestion).toHaveBeenCalledWith('t1', 'helpful'))
+    await waitFor(() => expect(reviewSuggestion).toHaveBeenCalledWith('t1', 'helpful', undefined, undefined))
   })
 
   it('department adopt buttons record opinion and do not claim auto draft write', async () => {

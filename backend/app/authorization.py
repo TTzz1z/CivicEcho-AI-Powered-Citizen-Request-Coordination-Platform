@@ -29,10 +29,17 @@ class AuthorizationPolicy:
     @staticmethod
     def can_view(principal: Principal, ticket: TicketModel, anonymous_key: str | None = None) -> bool:
         if principal.kind == "service":
-            return ticket.anonymous_creator_key is None or ticket.anonymous_creator_key == anonymous_key
+            return bool(
+                anonymous_key and ticket.creator_user_id is None
+                and ticket.anonymous_creator_key == anonymous_key
+            )
+        if principal.kind != "user":
+            return False
         if principal.role == "admin":
             return True
         if principal.role == "citizen":
+            if principal.user_id is None:
+                return False
             citizen_key = hashlib.sha256(f"web-user-{principal.user_id}".encode("utf-8")).hexdigest()
             return ticket.creator_user_id == principal.user_id or (
                 ticket.creator_user_id is None and ticket.anonymous_creator_key == citizen_key
@@ -76,7 +83,7 @@ class AuthorizationPolicy:
             raise PermissionDenied()
         if principal.role == "admin":
             return statement
-        if principal.role == "citizen":
+        if principal.role == "citizen" and principal.user_id is not None:
             citizen_key = hashlib.sha256(f"web-user-{principal.user_id}".encode("utf-8")).hexdigest()
             return statement.where(
                 or_(
@@ -87,7 +94,7 @@ class AuthorizationPolicy:
                     ),
                 )
             )
-        if principal.role == "department_staff":
+        if principal.role == "department_staff" and principal.department_id is not None:
             return statement.where(
                 (TicketModel.assigned_department_id == principal.department_id)
                 | TicketModel.work_orders.any(WorkOrderModel.department_id == principal.department_id)

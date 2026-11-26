@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Card, Col, Empty, Input, Row, Select, Spin, Statistic, Table, Tabs, Tag, Typography } from 'antd'
+import { Button, Card, Col, Collapse, Descriptions, Drawer, Empty, Grid, Input, Row, Select, Statistic, Table, Tabs, Tag, Typography, type TableProps } from 'antd'
 import {
   ApiOutlined, CheckCircleOutlined, ClockCircleOutlined, DollarOutlined,
   FireOutlined, SafetyOutlined, StopOutlined, ThunderboltOutlined,
@@ -11,6 +11,8 @@ import { getAiUsageLogs, getAiUsageStats, type AiUsageLogItem, type AiUsageStats
 import { ChartPanel } from '../components/ChartPanel'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
+import { WorkspaceLoading } from '../components/WorkspaceState'
+import { WorkspaceTableRegion } from '../components/WorkspaceTableRegion'
 
 const ROUTE_LABELS: Record<string, string> = {
   policy_rag: '政策咨询', service_guide: '办事指南', ticket_intake: '投诉/报修',
@@ -73,9 +75,10 @@ export function AdminAiUsagePage() {
       <PageHeader
         eyebrow="AI USAGE & SAFETY"
         title="AI 用量与安全"
-        description="所有指标均来自 ai_usage_logs 表的实时聚合，无静态假数据。每次模型调用、限流、缓存与降级均有完整审计记录。"
+        description="按时段查看模型调用、用量、限流与降级记录。"
         extra={
           <Select
+            aria-label="用量统计时段"
             value={days}
             onChange={setDays}
             style={{ width: 160 }}
@@ -110,7 +113,7 @@ export function AdminAiUsagePage() {
 // ========== Overview Tab ==========
 
 function OverviewTab({ data, loading }: { data?: AiUsageStats; loading: boolean }) {
-  if (loading && !data) return <Card className="surface"><Spin tip="加载中" /></Card>
+  if (loading && !data) return <Card className="surface"><WorkspaceLoading label="正在加载 AI 用量统计" /></Card>
   if (!data) return <Empty description="暂无数据" />
 
   return (
@@ -185,6 +188,7 @@ function TimeseriesTab({ data, loading }: { data?: AiUsageStats; loading: boolea
   const option = useMemo<EChartsOption>(() => {
     const rows = [...(data?.timeseries || [])].reverse()  // chronological
     return {
+      animation: false,
       tooltip: { trigger: 'axis' },
       legend: { bottom: 0, data: ['调用次数', 'Token 消耗', '缓存命中', '降级', '限流'] },
       grid: { left: 50, right: 20, top: 25, bottom: 50 },
@@ -203,11 +207,23 @@ function TimeseriesTab({ data, loading }: { data?: AiUsageStats; loading: boolea
     }
   }, [data])
 
-  if (loading && !data) return <Card className="surface"><Spin tip="加载中" /></Card>
+  if (loading && !data) return <Card className="surface"><WorkspaceLoading label="正在加载调用趋势" /></Card>
   const empty = !data?.timeseries.length
   return (
     <Card title="每日 AI 调用趋势" className="surface">
       <ChartPanel label="每日 AI 调用趋势图" option={option} empty={empty} />
+      {!empty && <Collapse items={[{ key: 'rows', label: '查看每日调用数据', children:
+        <WorkspaceTableRegion label="每日 AI 调用数据">
+          <Table size="small" rowKey="date" scroll={{ x: 500 }} pagination={false} dataSource={data?.timeseries} columns={[
+            { title: '日期', dataIndex: 'date' },
+            { title: '调用次数', dataIndex: 'calls', align: 'right' },
+            { title: 'Token 消耗', dataIndex: 'tokens', align: 'right' },
+            { title: '缓存命中', dataIndex: 'cache_hits', align: 'right' },
+            { title: '降级次数', dataIndex: 'degraded', align: 'right' },
+            { title: '限流次数', dataIndex: 'rate_limited', align: 'right' },
+          ]} />
+        </WorkspaceTableRegion>,
+      }]} />}
     </Card>
   )
 }
@@ -215,7 +231,7 @@ function TimeseriesTab({ data, loading }: { data?: AiUsageStats; loading: boolea
 // ========== Breakdown Tab ==========
 
 function BreakdownTab({ data, loading }: { data?: AiUsageStats; loading: boolean }) {
-  if (loading && !data) return <Card className="surface"><Spin tip="加载中" /></Card>
+  if (loading && !data) return <Card className="surface"><WorkspaceLoading label="正在加载调用分布" /></Card>
   if (!data) return <Empty description="暂无数据" />
   return (
     <Row gutter={[16, 16]}>
@@ -306,7 +322,7 @@ function BreakdownTab({ data, loading }: { data?: AiUsageStats; loading: boolean
 // ========== Safety Tab ==========
 
 function SafetyTab({ data, loading }: { data?: AiUsageStats; loading: boolean }) {
-  if (loading && !data) return <Card className="surface"><Spin tip="加载中" /></Card>
+  if (loading && !data) return <Card className="surface"><WorkspaceLoading label="正在加载降级统计" /></Card>
   if (!data) return <Empty description="暂无数据" />
   return (
     <Row gutter={[16, 16]}>
@@ -345,6 +361,8 @@ function SafetyTab({ data, loading }: { data?: AiUsageStats; loading: boolean })
 // ========== Logs Tab ==========
 
 function LogsTab() {
+  const compact = !Grid.useBreakpoint().md
+  const [selected, setSelected] = useState<AiUsageLogItem | null>(null)
   const [page, setPage] = useState(1)
   const [route, setRoute] = useState<string | undefined>(undefined)
   const [tier, setTier] = useState<string | undefined>(undefined)
@@ -359,58 +377,69 @@ function LogsTab() {
   })
   if (query.isError) return <ErrorState error={query.error} retry={() => query.refetch()} />
 
+  const mobileColumns: TableProps<AiUsageLogItem>['columns'] = [
+    { title: '调用', key: 'call', render: (_, row) => <div className="policy-result-text">
+      <div>{CAPABILITY_LABELS[row.capability || ''] || row.capability || '未知能力'}</div>
+      <Typography.Text type="secondary">{dayjs(row.created_at).format('MM-DD HH:mm')}</Typography.Text>
+    </div> },
+    { title: '状态', key: 'status', width: 72, render: (_, row) => <Tag color={!row.success ? 'red' : row.degraded ? 'gold' : 'green'}>
+      {!row.success ? '失败' : row.degraded ? '降级' : '成功'}
+    </Tag> },
+    { title: '操作', key: 'actions', width: 64, render: (_, row) => <Button size="small" type="link" onClick={() => setSelected(row)}>详情</Button> },
+  ]
+
   return (
     <Card
       title="近期模型调用明细"
       className="surface"
-      extra={
+      styles={{ body: { padding: compact ? 8 : 16 } }}
+    >
+      <div className="ai-usage-filters">
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <Select
-            allowClear placeholder="能力" style={{ width: 140 }}
+            aria-label="按能力筛选" allowClear placeholder="能力" style={{ width: 140 }}
             value={capability} onChange={v => { setCapability(v); setPage(1) }}
             options={Object.entries(CAPABILITY_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Select
-            allowClear placeholder="供应商" style={{ width: 140 }}
+            aria-label="按供应商筛选" allowClear placeholder="供应商" style={{ width: 140 }}
             value={provider} onChange={v => { setProvider(v); setPage(1) }}
             options={Object.entries(PROVIDER_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Input.Search
-            allowClear placeholder="session_id 模糊" style={{ width: 180 }}
+            aria-label="按会话编号搜索" allowClear placeholder="会话编号" style={{ width: 180 }}
             value={sessionId} onChange={e => { setSessionId(e.target.value || undefined); setPage(1) }}
             onSearch={v => { setSessionId(v || undefined); setPage(1) }}
           />
           <Select
-            allowClear placeholder="场景" style={{ width: 140 }}
+            aria-label="按场景筛选" allowClear placeholder="场景" style={{ width: 140 }}
             value={route} onChange={v => { setRoute(v); setPage(1) }}
             options={Object.entries(ROUTE_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Select
-            allowClear placeholder="模型分层" style={{ width: 140 }}
+            aria-label="按模型分层筛选" allowClear placeholder="模型分层" style={{ width: 140 }}
             value={tier} onChange={v => { setTier(v); setPage(1) }}
             options={Object.entries(TIER_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Select
-            allowClear placeholder="结果" style={{ width: 120 }}
+            aria-label="按调用结果筛选" allowClear placeholder="结果" style={{ width: 120 }}
             value={success} onChange={v => { setSuccess(v); setPage(1) }}
             options={[{ value: true, label: '成功' }, { value: false, label: '失败' }]}
           />
           <Select
-            allowClear placeholder="降级" style={{ width: 120 }}
+            aria-label="按降级状态筛选" allowClear placeholder="降级" style={{ width: 120 }}
             value={degraded} onChange={v => { setDegraded(v); setPage(1) }}
             options={[{ value: true, label: '已降级' }, { value: false, label: '正常' }]}
           />
         </div>
-      }
-      styles={{ body: { padding: 0 } }}
-    >
-      <Table
+      </div>
+      <WorkspaceTableRegion label="模型调用明细"><Table<AiUsageLogItem>
         rowKey="id"
         size="small"
         loading={query.isLoading}
         dataSource={query.data?.items}
-        scroll={{ x: 1400 }}
-        columns={[
+        scroll={compact ? undefined : { x: 1400 }}
+        columns={compact ? mobileColumns : [
           { title: '时间', dataIndex: 'created_at', width: 160, render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss') },
           { title: 'request_id', dataIndex: 'request_id', width: 120, ellipsis: true, render: (v: string) => <code style={{ fontSize: 11 }}>{v ? v.slice(0, 10) + '…' : '—'}</code> },
           { title: 'session_id', dataIndex: 'session_id', width: 140, ellipsis: true, render: (v: string | null) => <code style={{ fontSize: 11 }}>{v ? v.slice(0, 14) + '…' : '—'}</code> },
@@ -443,7 +472,8 @@ function LogsTab() {
               </>
             )
           },
-          { title: '错误', dataIndex: 'error', ellipsis: true, render: (v: string | null) => v || '—' },
+          { title: '错误码', dataIndex: 'error_code', ellipsis: true, render: (v: string | null) => v || '—' },
+          { title: '操作', key: 'actions', width: 72, render: (_, row) => <Button size="small" type="link" onClick={() => setSelected(row)}>详情</Button> },
         ]}
         pagination={{
           current: page,
@@ -452,7 +482,30 @@ function LogsTab() {
           onChange: setPage,
           showTotal: t => `共 ${t} 条`,
         }}
-      />
+      /></WorkspaceTableRegion>
+      <Drawer title="模型调用详情" open={Boolean(selected)} onClose={() => setSelected(null)} size="min(480px, 100vw)">
+        {selected && <AiUsageLogDetail log={selected} />}
+      </Drawer>
     </Card>
   )
+}
+
+function AiUsageLogDetail({ log }: { log: AiUsageLogItem }) {
+  const tokens = log.usage_unavailable ? '未返回' : log.total_tokens || (log.input_tokens + log.output_tokens)
+  return <Descriptions column={1} size="small" className="policy-result-text" items={[
+    { key: 'date', label: '时间', children: dayjs(log.created_at).format('YYYY-MM-DD HH:mm:ss') },
+    { key: 'request', label: '请求编号', children: log.request_id || '—' },
+    { key: 'session', label: '会话编号', children: log.session_id || '—' },
+    { key: 'role', label: '角色', children: ROLE_LABELS[log.role || ''] || log.role || '—' },
+    { key: 'scenario', label: '场景', children: ROUTE_LABELS[log.route || ''] || log.route || '—' },
+    { key: 'model', label: '模型', children: log.model_name || '—' },
+    { key: 'provider', label: '供应商', children: PROVIDER_LABELS[log.provider || ''] || log.provider || '—' },
+    { key: 'tier', label: '分层', children: TIER_LABELS[log.model_tier] || log.model_tier || '—' },
+    { key: 'tokens', label: '使用 Token', children: tokens },
+    { key: 'latency', label: '耗时', children: `${log.latency_ms} ms` },
+    { key: 'cost', label: '预估成本（元）', children: log.estimated_cost_rmb?.toFixed(4) ?? '—' },
+    { key: 'result', label: '结果', children: log.success ? '成功' : '失败' },
+    { key: 'degrade', label: '降级原因', children: log.degrade_reason || '—' },
+    { key: 'error', label: '错误码', children: log.error_code || '—' },
+  ]} />
 }

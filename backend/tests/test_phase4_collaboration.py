@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -156,3 +158,89 @@ def test_return_transfer_and_admin_dispute_coordination(actors):
     }, headers=auth(admin))
     assert resolved.status_code == 200
     assert resolved.json()["data"]["collaboration_status"] == "in_progress"
+
+
+def test_pending_primary_submission_review_and_closed_guards(actors):
+    citizen, agent, staff, admin = (actors[name] for name in ("citizen", "agent", "staff0", "admin"))
+    ticket_id = create_ticket(citizen)["ticket_id"]
+    path = f"/api/v1/tickets/{ticket_id}"
+    accepted = client.post(f"{path}/accept", json={"version": 1, "remark": "受理"}, headers=auth(agent))
+    primary = create_order(ticket_id, accepted.json()["data"]["version"], "primary", staff["department_id"], agent)
+    submitted = action(ticket_id, primary, "submit", staff, result_payload("本部门") | {"internal_note": "内部草稿备注"})
+    assert submitted["accepted_at"] and submitted["submitted_at"]
+    assert {item["action"] for item in submitted["history"]} == {"create", "start", "submit_result"}
+
+    detail = client.get(path, headers=auth(agent)).json()["data"]
+    draft = {
+        "remark": "内部汇总", "resolution_summary": "内部汇总摘要", "resolution_measures": "内部汇总措施",
+        "resolution_outcome": "resolved", "public_reply": "等待复核的答复", "internal_note": "内部答复备注",
+    }
+    summary = client.post(f"{path}/summary", json=draft | {"version": detail["version"]}, headers=auth(staff))
+    assert summary.status_code == 200, summary.text
+    current = summary.json()["data"]
+    assert (current["status"], current["collaboration_status"]) == ("processing", "awaiting_review")
+    agent_view = client.get(path, headers=auth(agent)).json()["data"]
+    assert agent_view["review_draft"]["public_reply"] == draft["public_reply"]
+    citizen_view = client.get(path, headers=auth(citizen)).json()["data"]
+    assert "review_draft" not in citizen_view and "public_reply" not in citizen_view
+    assert any(item["content"] == "主办部门已提交答复，等待坐席审核" for item in citizen_view["history"])
+    orders_view = client.get(f"{path}/work-orders", headers=auth(citizen)).json()["data"]
+    assert all("internal_note" not in row and "public_content" not in row and not row["history"] for row in orders_view)
+
+    def in_queue(actor, queue):
+        response = client.get("/api/v1/tickets", params={"work_queue": queue, "keyword": ticket_id}, headers=auth(actor))
+        assert response.status_code == 200, response.text
+        return any(item["ticket_id"] == ticket_id for item in response.json()["data"]["items"])
+
+    assert in_queue(agent, "awaiting_review")
+    returned = client.post(f"{path}/return-to-department", json={
+        "version": current["version"], "remark": "退回补充", "return_reason": "补充现场记录",
+    }, headers=auth(agent))
+    assert returned.status_code == 200, returned.text
+    assert not in_queue(agent, "awaiting_review") and in_queue(staff, "returned")
+    detail = client.get(path, headers=auth(staff)).json()["data"]
+    assert "review_draft" not in detail
+    action(ticket_id, detail["work_orders"][0], "submit", staff, result_payload("补充后"))
+    assert not in_queue(staff, "returned")
+    detail = client.get(path, headers=auth(staff)).json()["data"]
+    summary = client.post(f"{path}/summary", json=draft | {"version": detail["version"]}, headers=auth(staff))
+    assert summary.status_code == 200, summary.text
+    resolved = client.post(f"{path}/review-resolve", json=draft | {
+        "version": summary.json()["data"]["version"], "public_reply": "已审核的最终答复",
+    }, headers=auth(agent))
+    assert resolved.status_code == 200, resolved.text
+    current = resolved.json()["data"]
+    assert client.get(path, headers=auth(citizen)).json()["data"]["public_reply"] == "已审核的最终答复"
+    restarted = client.post(f"{path}/process", json={"version": current["version"], "remark": "重新办理"}, headers=auth(admin))
+    assert restarted.status_code == 409 and restarted.json()["error"]["code"] == "INVALID_STATUS_TRANSITION"
+    closed = client.post(f"{path}/close", json={
+        "version": current["version"], "remark": "代为办结", "override_reason": "电话回访确认",
+    }, headers=auth(admin))
+    assert closed.status_code == 200, closed.text
+    disputed = client.post(f"{path}/dispute", json={
+        "version": closed.json()["data"]["version"], "remark": "归属争议", "dispute_reason": "申请协调责任",
+    }, headers=auth(admin))
+    assert disputed.status_code == 409 and disputed.json()["error"]["code"] == "WORK_ORDER_NOT_ALLOWED"
+
+
+def test_concurrent_master_and_primary_start_use_one_lock_order(actors):
+    citizen, agent, staff = (actors[name] for name in ("citizen", "agent", "staff0"))
+    ticket_id = create_ticket(citizen)["ticket_id"]
+    path = f"/api/v1/tickets/{ticket_id}"
+    accepted = client.post(f"{path}/accept", json={"version": 1, "remark": "受理"}, headers=auth(agent))
+    primary = create_order(ticket_id, accepted.json()["data"]["version"], "primary", staff["department_id"], agent)
+    assigned = client.get(path, headers=auth(staff)).json()["data"]
+    barrier = Barrier(2, timeout=10)
+
+    def start(action_path, version):
+        barrier.wait()
+        return client.post(action_path, json={"version": version, "remark": "开始办理"}, headers=auth(staff))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        master = executor.submit(start, f"{path}/process", assigned["version"])
+        work_order = executor.submit(start, f"{path}/work-orders/{primary['id']}/start", primary["version"])
+        responses = [request.result(timeout=15) for request in (master, work_order)]
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    final = client.get(path, headers=auth(staff)).json()["data"]
+    assert final["status"] == final["work_orders"][0]["status"] == "processing"
+    assert final["version"] == assigned["version"] + 1

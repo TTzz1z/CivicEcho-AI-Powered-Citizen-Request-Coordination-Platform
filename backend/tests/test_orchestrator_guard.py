@@ -7,7 +7,7 @@ These tests verify:
 4. "博士家属有什么待遇" routes to policy RAG
 5. "路灯坏了三天" routes to ticket intake draft
 6. "查询QT2026..." routes directly to ticket DB query (no LLM)
-7. Repeated policy question hits semantic cache
+7. The standalone semantic-cache helper isolates and retrieves entries
 8. Visitor exceeding budget is prompted to login
 9. When LLM unavailable, ticket query and basic ticket submission still work
 10. Admin can view real Token and rate-limit data from ai_usage_logs
@@ -16,11 +16,6 @@ All tests use rule-based mode (AI_API_KEY="" in conftest.py) so no real LLM is c
 """
 from __future__ import annotations
 
-import os
-import sys
-import types
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
 
 import pytest
 

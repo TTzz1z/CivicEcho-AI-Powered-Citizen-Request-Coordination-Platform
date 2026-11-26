@@ -9,11 +9,22 @@ still recording the OCR signal for admins.
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
 import re
-from dataclasses import dataclass
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
+from threading import BoundedSemaphore
 
 logger = logging.getLogger(__name__)
+MAX_PARSE_INPUT_BYTES = 20 * 1024 * 1024
+MAX_PARSE_TEXT_CHARS = 500_000
+MAX_PDF_PAGES = 400
+PARSE_TIMEOUT_SECONDS = 15
+PARSE_MEMORY_BYTES = 384 * 1024 * 1024
+_PARSER_SLOTS = BoundedSemaphore(2)
 
 
 @dataclass
@@ -31,7 +42,38 @@ class ParsedDocument:
 
 
 def parse_bytes(data: bytes, filename: str, mime_type: str | None = None) -> ParsedDocument:
-    """Parse uploaded bytes into text. Returns ParsedDocument."""
+    """Parse uploaded bytes in a replaceable process with a wall-clock limit."""
+    filename = filename or ""
+    extension = filename.lower().rsplit(".", 1)[-1]
+    file_type = {"pdf": "pdf", "doc": "word", "docx": "word", "md": "markdown", "markdown": "markdown"}.get(extension, "text")
+    if len(data) > MAX_PARSE_INPUT_BYTES:
+        return _budget_failure(file_type, "文件体积超过解析上限")
+    if not _PARSER_SLOTS.acquire(blocking=False):
+        return _budget_failure(file_type, "文档解析繁忙，请稍后重试")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-B", __file__, "--parse-worker", filename, mime_type or ""],
+            input=data,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=PARSE_TIMEOUT_SECONDS,
+            check=True,
+        )
+        return ParsedDocument(**json.loads(completed.stdout))
+    except subprocess.TimeoutExpired:
+        return _budget_failure(file_type, "文档解析超时")
+    except (OSError, subprocess.CalledProcessError, ValueError, TypeError):
+        return _budget_failure(file_type, "文档解析失败或超过资源上限")
+    finally:
+        _PARSER_SLOTS.release()
+
+
+def _budget_failure(file_type: str, note: str) -> ParsedDocument:
+    return ParsedDocument(text="", file_type=file_type, ocr_status="failed",
+                          ocr_quality=None, page_count=None, parser_notes=[note])
+
+
+def _parse_document(data: bytes, filename: str, mime_type: str) -> ParsedDocument:
     name = (filename or "").lower()
     if name.endswith(".pdf") or (mime_type or "").lower() == "application/pdf":
         return _parse_pdf(data)
@@ -71,7 +113,10 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
     try:
         reader = PdfReader(io.BytesIO(data))
         page_count = len(reader.pages)
+        if page_count > MAX_PDF_PAGES:
+            return _budget_failure("pdf", f"PDF 超过 {MAX_PDF_PAGES} 页的解析上限")
         pages_text: list[str] = []
+        text_chars = 0
         non_text_pages = 0
         for page in reader.pages:
             try:
@@ -79,12 +124,15 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
             except Exception as exc:  # extraction can fail per-page
                 logger.debug("page extract failed: %s", exc)
                 txt = ""
+            text_chars += len(txt)
+            if text_chars > MAX_PARSE_TEXT_CHARS:
+                return _budget_failure("pdf", "PDF 正文超过解析上限")
             pages_text.append(txt)
             # Heuristic: a page with very few extractable chars likely is scanned
             stripped = re.sub(r"\s+", "", txt)
             if len(stripped) < 20:
                 non_text_pages += 1
-        text = "\n\n".join(pages_text).strip()
+        text = "\f".join(page.strip() for page in pages_text)
         # OCR signal: if >50% of pages have no extractable text, mark as scanned
         if page_count > 0 and non_text_pages / page_count > 0.5:
             ocr_status = "required"
@@ -116,16 +164,26 @@ def _parse_docx(data: bytes) -> ParsedDocument:
     try:
         doc = Document(io.BytesIO(data))
         parts: list[str] = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                parts.append(text)
-        # Tables
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-                if row_text:
-                    parts.append(row_text)
+        text_chars = 0
+        from docx.text.paragraph import Paragraph
+
+        for block in doc.iter_inner_content():
+            if isinstance(block, Paragraph):
+                line = block.text.strip()
+                if line:
+                    prefix = "# " if block.style and block.style.name.startswith("Heading") else ""
+                    parts.append(prefix + line)
+                    text_chars += len(prefix) + len(line)
+            else:
+                for row in block.rows:
+                    row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                    if row_text:
+                        parts.append(row_text)
+                        text_chars += len(row_text)
+                    if text_chars > MAX_PARSE_TEXT_CHARS:
+                        return _budget_failure("word", "Word 正文超过解析上限")
+            if text_chars > MAX_PARSE_TEXT_CHARS:
+                return _budget_failure("word", "Word 正文超过解析上限")
         return ParsedDocument(
             text="\n\n".join(parts), file_type="word", ocr_status="none",
             ocr_quality=None, page_count=None, parser_notes=[],
@@ -141,8 +199,10 @@ def _parse_markdown(text: str) -> ParsedDocument:
     try:
         import markdown as md  # type: ignore
         from bs4 import BeautifulSoup  # type: ignore
-        html = md.markdown(text)
+        html = md.markdown(text, extensions=["tables"])
         soup = BeautifulSoup(html, "html.parser")
+        for heading in soup.find_all(re.compile(r"^h[1-6]$")):
+            heading.string = "#" * int(heading.name[1]) + " " + heading.get_text(" ", strip=True)
         plain = soup.get_text(separator="\n")
         return ParsedDocument(
             text=plain.strip(), file_type="markdown", ocr_status="none",
@@ -158,6 +218,20 @@ def _parse_markdown(text: str) -> ParsedDocument:
             ocr_quality=None, page_count=None,
             parser_notes=["markdown 库未安装，已按基础规则解析"],
         )
+
+
+def _parse_worker(filename: str, mime_type: str) -> None:
+    if os.name == "posix":
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (PARSE_MEMORY_BYTES, PARSE_MEMORY_BYTES))
+    data = sys.stdin.buffer.read(MAX_PARSE_INPUT_BYTES + 1)
+    if len(data) > MAX_PARSE_INPUT_BYTES:
+        raise SystemExit("document input exceeds the limit")
+    result = _parse_document(data, filename, mime_type)
+    if len(result.text) > MAX_PARSE_TEXT_CHARS:
+        result = _budget_failure(result.file_type, "文档正文超过解析上限")
+    sys.stdout.buffer.write(json.dumps(asdict(result), ensure_ascii=False).encode("utf-8"))
 
 
 # --- Text utilities used by KB service ---
@@ -188,3 +262,7 @@ def extract_keywords(text: str, max_keywords: int = 20) -> list[str]:
         if len(result) >= max_keywords:
             break
     return result
+
+
+if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--parse-worker":
+    _parse_worker(sys.argv[2], sys.argv[3])

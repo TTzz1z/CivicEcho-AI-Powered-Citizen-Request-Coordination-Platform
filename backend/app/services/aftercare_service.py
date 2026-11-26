@@ -4,13 +4,18 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from opentelemetry.propagate import inject
 
 from ..authorization import AuthorizationPolicy, Principal
-from ..errors import BusinessError, PermissionDenied, TicketNotFound, VersionConflict
-from ..models import AppealModel, FollowUpTaskModel, NotificationModel, PhoneFollowUpRecordModel, TicketStatusHistoryModel, UserModel
+from ..config import get_settings
+from ..errors import BusinessError, TicketNotFound, VersionConflict
+from ..models import AppealModel, FollowUpTaskModel, NotificationModel, NotificationOutboxModel, PhoneFollowUpRecordModel, TicketStatusHistoryModel, UserModel
 from ..repositories.aftercare import AftercareRepository, NotificationRepository
 from ..repositories.identity import AuditRepository
+from ..repositories.work_orders import WorkOrderRepository
 from ..schemas import AppealList, AppealRead, FollowUpTaskList, FollowUpTaskRead, NotificationList, NotificationRead, PhoneFollowUpRecordRead
+from .ticket_service import resolution_sla
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +31,7 @@ EVENT_COPY = {
     "ticket_accepted": ("工单已受理", "工单 {ticket_id} 已受理，正在安排承办。"),
     "supplement_required": ("需要补充材料", "工单 {ticket_id} 需要补充材料：{detail}"),
     "ticket_assigned": ("工单已派发", "工单 {ticket_id} 已派发至承办部门。"),
-    "ticket_due_soon": ("工单即将超时", "工单 {ticket_id} 距办理时限不足 4 小时，请及时处理。"),
+    "ticket_due_soon": ("工单即将超时", "工单 {ticket_id} 临近当前办理时限，请及时处理。"),
     "ticket_overdue": ("工单已超时", "工单 {ticket_id} 已超过办理时限，请立即处理或升级。"),
     "processing_completed": ("处理完成", "工单 {ticket_id} 已形成处理结果。"),
     "awaiting_confirmation": ("等待市民确认", "请查看工单 {ticket_id} 的办理结果并确认或提出申诉。"),
@@ -162,49 +167,63 @@ class AftercareService:
         ) for user_id in recipients]
         self.notifications.add_missing(items)
 
-    def on_ticket_event(self, event_type: str, ticket, principal: Principal | None = None, detail: str = "") -> None:
+    def enqueue(self, event_type: str, ticket, *, detail: str = "", occurrence: str | int | None = None,
+                recipient_ids: set[int] | None = None, principal: Principal | None = None) -> None:
         if event_type == "resolved":
             active = self.repository.active_appeal(ticket.ticket_id)
             if active and active.status == "reprocessing":
                 active.status = "completed"
                 active.result_summary = ticket.public_reply or ticket.resolution_summary
                 active.completed_at = datetime.now(timezone.utc)
-                self.repository.commit()
-                self._emit_best_effort("appeal_completed", ticket, detail=active.result_summary or "已完成", occurrence=active.appeal_no)
+                self.enqueue("appeal_completed", ticket, detail=active.result_summary or "已完成", occurrence=active.appeal_no)
                 if principal:
-                    self._audit(principal, "complete_appeal", "appeal", active.id, {"appeal_no": active.appeal_no})
+                    self._audit(principal, "complete_appeal", "appeal", active.id, {"appeal_no": active.appeal_no}, commit=False)
             self._ensure_follow_up(ticket)
-            self._emit_best_effort("processing_completed", ticket, occurrence=ticket.handling_round)
-            self._emit_best_effort("awaiting_confirmation", ticket, occurrence=ticket.handling_round)
+            self.enqueue("processing_completed", ticket, occurrence=ticket.handling_round)
+            self.enqueue("awaiting_confirmation", ticket, occurrence=ticket.handling_round)
             return
         if event_type == "closed":
             for task in ticket.follow_up_tasks:
                 if task.status in {"pending", "in_progress"}:
                     task.status = "cancelled"
                     task.completed_at = datetime.now(timezone.utc)
-            self.repository.commit()
-            self._emit_best_effort("ticket_closed", ticket, occurrence=ticket.handling_round)
-            return
-        self._emit_best_effort(event_type, ticket, detail=detail)
+            event_type, occurrence = "ticket_closed", ticket.handling_round
+        title, template = EVENT_COPY[event_type]
+        marker = occurrence if occurrence is not None else ticket.version
+        handling_round = ticket.handling_round or 1
+        recipients = recipient_ids if recipient_ids is not None else self._recipients(event_type, ticket)
+        if recipients:
+            carrier: dict[str, str] = {}
+            inject(carrier)
+            rows = [{
+                "id": str(uuid4()), "event_type": event_type, "recipient_user_id": user_id,
+                "traceparent": carrier.get("traceparent"),
+                "ticket_id": ticket.ticket_id, "title": title, "channel": "in_app", "status": "pending",
+                "content": template.format(ticket_id=ticket.ticket_id, detail=detail),
+                "idempotency_key": f"{event_type}:{ticket.ticket_id}:r{handling_round}:info:{marker}:{user_id}",
+            } for user_id in sorted(recipients)]
+            self.repository.db.execute(insert(NotificationOutboxModel).values(rows)
+                                       .on_conflict_do_nothing(index_elements=["idempotency_key"]))
 
-    def _ensure_follow_up(self, ticket) -> FollowUpTaskModel:
-        existing = self.repository.db.scalar(select(FollowUpTaskModel).where(
-            FollowUpTaskModel.ticket_id == ticket.ticket_id,
-            FollowUpTaskModel.handling_round == ticket.handling_round,
-        ))
-        if existing:
-            return existing
-        task = FollowUpTaskModel(
+    def on_ticket_event(self, event_type: str, ticket, principal: Principal | None = None, detail: str = "") -> None:
+        if event_type == "resolved":
+            self._emit_best_effort("processing_completed", ticket, occurrence=ticket.handling_round)
+            self._emit_best_effort("awaiting_confirmation", ticket, occurrence=ticket.handling_round)
+        elif event_type == "closed":
+            self._emit_best_effort("ticket_closed", ticket, occurrence=ticket.handling_round)
+        else:
+            self._emit_best_effort(event_type, ticket, detail=detail)
+
+    def _ensure_follow_up(self, ticket) -> None:
+        self.repository.db.execute(insert(FollowUpTaskModel).values(
             id=str(uuid4()), ticket_id=ticket.ticket_id, handling_round=ticket.handling_round,
             status="pending", due_at=datetime.now(timezone.utc) + timedelta(hours=FOLLOW_UP_DUE_HOURS),
-        )
-        self.repository.db.add(task)
-        self.repository.commit()
-        return task
+        ).on_conflict_do_nothing(index_elements=["ticket_id", "handling_round"]))
 
     def scan_due_soon(self) -> None:
-        threshold = datetime.now(timezone.utc) + timedelta(hours=4)
-        for ticket in self.repository.due_soon_tickets(threshold):
+        now = datetime.now(timezone.utc)
+        threshold = now + timedelta(hours=get_settings().worker_due_soon_hours)
+        for ticket in self.repository.due_soon_tickets(threshold, now=now):
             deadline = ticket.accept_due_at if ticket.status == "pending" else ticket.resolve_due_at
             # P0-G: pass threshold_level for idempotency key uniqueness
             self.emit("ticket_due_soon", ticket,
@@ -304,6 +323,7 @@ class AftercareService:
         try:
             self._audit(principal, "submit_appeal", "appeal", item.id,
                         {"ticket_id": ticket.ticket_id, "sequence": sequence}, commit=False)
+            self.enqueue("appeal_submitted", ticket, occurrence=item.appeal_no)
             self.repository.commit()
         except Exception:
             self.repository.rollback()
@@ -315,14 +335,14 @@ class AftercareService:
     def review_appeal(self, appeal_id: str, decision: str, review_comment: str,
                       reprocess_instructions: str | None, principal: Principal):
         AuthorizationPolicy.require_roles(principal, "admin")
-        item = self.repository.appeal(appeal_id, lock=True)
+        ticket = self.repository.lock_ticket_for(AppealModel, appeal_id)
+        item = self.repository.appeal(appeal_id, lock=True) if ticket is not None else None
         if not item:
             raise BusinessError("APPEAL_NOT_FOUND", "申诉不存在", 404)
         if item.status != "submitted":
             raise BusinessError("APPEAL_ALREADY_REVIEWED", "申诉已经审核，不能重复操作", 409)
-        ticket = self.repository.ticket(item.ticket_id, lock=True)
-        if not ticket:
-            raise TicketNotFound(item.ticket_id)
+        if decision == "approved" and ticket.status not in {"resolved", "closed"}:
+            raise BusinessError("APPEAL_NOT_ALLOWED", "只有处理完成或已办结工单可以重新办理", 409)
         now = datetime.now(timezone.utc)
         item.review_comment = review_comment.strip()
         item.reviewed_by_user_id = principal.user_id
@@ -345,29 +365,47 @@ class AftercareService:
             ticket.resolved_at = None
             ticket.closed_at = None
             ticket.closure_type = None
+            ticket.resolution_summary = None
+            ticket.resolution_measures = None
+            ticket.resolution_outcome = None
+            ticket.public_reply = None
+            ticket.internal_note = None
+            ticket.review_draft = None
+            ticket.resolve_due_at = now + resolution_sla(ticket.priority, ticket.category)
+            ticket.sla_paused_at = None
+            ticket.sla_pause_reason = None
+            ticket.total_paused_seconds = 0
             ticket.collaboration_status = "in_progress"
             ticket.version += 1
-            # P0-A: reset primary work order so department can re-submit after appeal approval.
-            from ..models import WorkOrderModel
-            primary_order = self.repository.db.scalar(select(WorkOrderModel).where(
-                WorkOrderModel.ticket_id == ticket.ticket_id,
-                WorkOrderModel.task_type == "primary",
-                WorkOrderModel.status.notin_(("returned", "transferred", "cancelled")),
-            ))
-            if primary_order:
-                primary_order.status = "processing"
-                primary_order.submitted_at = None
-                primary_order.completed_at = None
-                primary_order.result_summary = None
-                primary_order.result_measures = None
-                primary_order.result_outcome = None
-                primary_order.public_content = None
-                primary_order.internal_note = None
-                primary_order.version += 1
+            work_orders = WorkOrderRepository(self.repository.db)
+            orders = [order for order in work_orders.list_for_ticket(ticket.ticket_id)
+                      if order.status not in {"returned", "transferred", "cancelled"}]
+            for order in orders:
+                previous_order_status = order.status
+                previous_summary = order.result_summary
+                is_primary = order.task_type == "primary"
+                order.status = "processing" if is_primary else "pending"
+                order.accepted_at = now if is_primary else None
+                order.submitted_at = None
+                order.completed_at = None
+                order.result_summary = None
+                order.result_measures = None
+                order.result_outcome = None
+                order.public_content = None
+                order.internal_note = None
+                order.version += 1
+                history = "申诉审核通过，进入重新办理" + (f"。上一轮摘要：{previous_summary}" if previous_summary else "")
+                work_orders.record(order, principal.user_id, "appeal_reprocess", previous_order_status, history)
+            if not any(order.task_type == "primary" for order in orders):
+                # Legacy records may lack a primary task. Send the new round through dispatch.
+                ticket.status = "accepted"
+                ticket.collaboration_status = "awaiting_dispatch"
+                ticket.assigned_department_id = None
+                ticket.assigned_user_id = None
             self.repository.db.add(TicketStatusHistoryModel(
                 ticket_id=ticket.ticket_id, operator_user_id=principal.user_id, operation_type="approve_appeal",
                 content=f"第 {item.sequence} 次申诉审核通过，进入重新办理",
-                previous_status=previous, current_status="processing",
+                previous_status=previous, current_status=ticket.status,
                 remark=item.reprocess_instructions, visibility="public",
             ))
             event = "appeal_approved"
@@ -375,6 +413,7 @@ class AftercareService:
         try:
             self._audit(principal, "review_appeal", "appeal", item.id,
                         {"decision": decision, "ticket_id": ticket.ticket_id}, commit=False)
+            self.enqueue(event, ticket, detail=detail, occurrence=item.appeal_no)
             self.repository.commit()
         except Exception:
             self.repository.rollback()
@@ -385,14 +424,12 @@ class AftercareService:
     def record_phone_follow_up(self, task_id: str, ticket_version: int, contact_result: str,
                                satisfaction: str | None, outcome: str, notes: str, principal: Principal):
         AuthorizationPolicy.require_roles(principal, "agent", "admin")
-        task = self.repository.follow_up(task_id, lock=True)
+        ticket = self.repository.lock_ticket_for(FollowUpTaskModel, task_id)
+        task = self.repository.follow_up(task_id, lock=True) if ticket is not None else None
         if not task:
             raise BusinessError("FOLLOW_UP_NOT_FOUND", "回访任务不存在", 404)
         if task.status in {"completed", "cancelled"}:
             raise BusinessError("FOLLOW_UP_CLOSED", "回访任务已经结束", 409)
-        ticket = self.repository.ticket(task.ticket_id, lock=True)
-        if not ticket:
-            raise TicketNotFound(task.ticket_id)
         if ticket.version != ticket_version:
             raise VersionConflict()
         record = PhoneFollowUpRecordModel(
@@ -423,6 +460,10 @@ class AftercareService:
             self._audit(principal, "record_phone_follow_up", "follow_up_task", task.id, {
                 "ticket_id": ticket.ticket_id, "contact_result": contact_result, "outcome": outcome,
             }, commit=False)
+            if outcome == "confirmed":
+                self.enqueue("ticket_closed", ticket, occurrence=f"phone-{task.handling_round}")
+            elif outcome == "appeal_requested" and ticket.creator_user_id:
+                self.enqueue("appeal_prompt", ticket, occurrence=record.id, recipient_ids={ticket.creator_user_id})
             self.repository.commit()
         except Exception:
             self.repository.rollback()

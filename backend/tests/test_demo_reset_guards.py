@@ -7,7 +7,7 @@ from scripts.demo_reset import assert_safe_to_reset
 
 
 def test_demo_reset_requires_confirm(monkeypatch):
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "civicecho-isolated-test-2468")
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -20,7 +20,7 @@ def test_demo_reset_requires_confirm(monkeypatch):
 
 
 def test_demo_reset_rejects_production(monkeypatch):
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "civicecho-isolated-test-2468")
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -32,7 +32,7 @@ def test_demo_reset_rejects_production(monkeypatch):
 
 
 def test_demo_reset_rejects_unknown_database(monkeypatch):
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "civicecho-isolated-test-2468")
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -44,7 +44,7 @@ def test_demo_reset_rejects_unknown_database(monkeypatch):
 
 
 def test_demo_reset_requires_database_url(monkeypatch):
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "civicecho-isolated-test-2468")
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(SystemExit) as exc:
@@ -53,7 +53,7 @@ def test_demo_reset_requires_database_url(monkeypatch):
 
 
 def test_demo_reset_allows_whitelist_with_confirm(monkeypatch):
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "civicecho-isolated-test-2468")
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv(
         "DATABASE_URL",

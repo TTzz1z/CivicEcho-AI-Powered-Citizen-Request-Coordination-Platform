@@ -50,6 +50,7 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
   const departments=useQuery({queryKey:['departments'],queryFn:listDepartments,enabled:user.role!=='citizen'})
   const staff=useQuery({queryKey:['department-staff',staffDepartment],queryFn:()=>listDepartmentStaff(staffDepartment!),enabled:!!staffDepartment&&user.role!=='citizen'})
   const primary=ticket.work_orders.find(x=>x.task_type==='primary'&&['pending','processing','submitted'].includes(x.status))
+  const editable = !['resolved', 'closed', 'rejected'].includes(ticket.status)
   const canCreate=['agent','admin'].includes(user.role)&&['accepted','assigned','processing'].includes(ticket.status)
   const canSummarize=ticket.collaboration_status==='awaiting_summary'&&(
     user.role==='admin'||(user.role==='department_staff'&&!!primary&&primary.department_id===user.department_id&&(primary.assignee_user_id==null||primary.assignee_user_id===user.id))
@@ -63,6 +64,9 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
     setStaffDepartment(departmentId)
     if(next==='create')form.setFieldsValue({task_type:primary?'support':'primary'})
     if(next==='submit'||next==='summarize'||next==='review_resolve')form.setFieldsValue({result_outcome:'resolved',resolution_outcome:'resolved'})
+    if (next === 'review_resolve' && ticket.review_draft) {
+      form.setFieldsValue({ ...ticket.review_draft, internal_note: ticket.review_draft.internal_note ?? undefined })
+    }
   }
   const close=()=>{setMode(null);setSelected(null);setStaffDepartment(undefined);form.resetFields()}
   const mutation=useMutation({
@@ -98,8 +102,8 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
     {canSummarize&&<Button type="primary" icon={<CheckCircleOutlined/>} onClick={()=>open('summarize')}>汇总最终答复</Button>}
     {canReviewResolve&&<Button type="primary" icon={<CheckCircleOutlined/>} onClick={()=>open('review_resolve')}>审核办结</Button>}
     {canReviewResolve&&<Button icon={<RollbackOutlined/>} onClick={()=>open('return_to_department')}>退回部门</Button>}
-    {user.role!=='citizen'&&ticket.collaboration_status!=='disputed'&&ticket.collaboration_status!=='awaiting_review'&&ticket.work_orders.length>0&&<Button danger onClick={()=>open('dispute')}>归属争议</Button>}
-    {user.role==='admin'&&ticket.collaboration_status==='disputed'&&<Button danger type="primary" onClick={()=>open('resolve_dispute')}>协调争议</Button>}
+    {editable&&user.role!=='citizen'&&ticket.collaboration_status!=='disputed'&&ticket.collaboration_status!=='awaiting_review'&&ticket.work_orders.length>0&&<Button danger onClick={()=>open('dispute')}>归属争议</Button>}
+    {editable&&user.role==='admin'&&ticket.collaboration_status==='disputed'&&<Button danger type="primary" onClick={()=>open('resolve_dispute')}>协调争议</Button>}
   </Space>}>
     {ticket.collaboration_status==='awaiting_dispatch'&&<Alert showIcon type="warning" message="主办部门已退回，等待坐席重新派发" description={ticket.dispatch_return_reason} style={{marginBottom:16}}/>}
     {ticket.collaboration_status==='awaiting_review'&&<Alert showIcon type="info" message="主办部门已提交答复，等待坐席审核办结" style={{marginBottom:16}}/>}
@@ -124,7 +128,7 @@ export function WorkOrderPanel({ticket,user,onChanged,collapseCompleted=false}:{
               <Descriptions size="small" column={1} items={[{key:'owner',label:'责任人',children:order.assignee_name||'待指定'},{key:'updated',label:'最近更新',children:new Date(order.updated_at).toLocaleString('zh-CN')}]}/>
               {order.result_summary&&<div className="work-order-result"><b>{order.result_summary}</b><p>{order.public_content}</p></div>}
               {order.return_reason&&<Alert type="warning" showIcon message={order.return_reason}/>}
-              {user.role!=='citizen'&&<div className="work-order-actions">
+              {editable&&user.role!=='citizen'&&<div className="work-order-actions">
                 {canAssign&&active&&<Button size="small" icon={<UserSwitchOutlined/>} onClick={()=>open('assign',order)}>责任人</Button>}
                 {canOperate&&order.status==='pending'&&<Button size="small" type="primary" onClick={()=>open('start',order)}>开始办理</Button>}
                 {canOperate&&active&&<Button size="small" icon={<RetweetOutlined/>} onClick={()=>open('transfer',order)}>转派</Button>}

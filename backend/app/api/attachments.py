@@ -15,7 +15,7 @@ from ..repositories.postgres import PostgreSQLTicketRepository
 from ..schemas import AttachmentDelete, AttachmentList, AttachmentRead, SuccessResponse
 from ..services.attachment_service import AttachmentService
 from ..storage import get_object_storage
-from .dependencies import get_user_principal
+from .dependencies import get_user_principal, require_upload_rate_limit
 
 
 router = APIRouter(tags=["attachments"])
@@ -43,6 +43,7 @@ def upload_attachment(
     attachment_type: str = Form(...),
     visibility: str = Form("public"),
     principal: Principal = Depends(get_user_principal),
+    _: None = Depends(require_upload_rate_limit),
     service: AttachmentService = Depends(get_attachment_service),
 ):
     result = service.upload(

@@ -22,7 +22,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      object-storage:
         condition: service_healthy
       clamav:
         condition: service_healthy

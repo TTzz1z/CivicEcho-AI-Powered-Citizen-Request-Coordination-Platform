@@ -47,7 +47,7 @@ def request(method, path, actor, payload=None):
     return response.json()["data"]
 
 
-def resolve_ticket(actors, label):
+def resolve_ticket(actors, label, *, with_support=False):
     ticket = request("POST", "/api/v1/tickets", actors["citizen"], {
         "idempotency_key": str(uuid4()), "request_type": "投诉",
         "description": f"{label}阶段五闭环验证事项", "location": "幸福路社区", "source": "phase5-pytest",
@@ -62,14 +62,19 @@ def resolve_ticket(actors, label):
     ticket = request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/process", actors["staff"], {
         "version": ticket["version"], "remark": "开始现场处置",
     })
+    if with_support:
+        request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/work-orders", actors["agent"], {
+            "version": ticket["version"], "task_type": "support", "department_id": actors["department_id"],
+            "instructions": "核实配合处置事项",
+        })
     # P0-A: submit work order result, then summarize, then agent reviews and resolves.
     detail = request("GET", f"/api/v1/tickets/{ticket['ticket_id']}", actors["staff"])
-    primary = next(item for item in detail["work_orders"] if item["task_type"] == "primary")
-    request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/work-orders/{primary['id']}/submit", actors["staff"], {
-        "version": primary["version"], "remark": "处置完成",
-        "result_summary": "事项已经处理", "result_measures": "完成现场处置并复核",
-        "result_outcome": "resolved", "public_content": "问题已经处理完成，请确认。",
-    })
+    for order in detail["work_orders"]:
+        request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/work-orders/{order['id']}/submit", actors["staff"], {
+            "version": order["version"], "remark": "处置完成",
+            "result_summary": "事项已经处理", "result_measures": "完成现场处置并复核",
+            "result_outcome": "resolved", "public_content": "问题已经处理完成，请确认。",
+        })
     # Re-fetch to get the latest ticket version (work order submit bumps ticket.version).
     detail = request("GET", f"/api/v1/tickets/{ticket['ticket_id']}", actors["staff"])
     ticket = request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/summary", actors["staff"], {
@@ -112,7 +117,7 @@ def test_notifications_and_phone_follow_up_close(actors):
 
 
 def test_appeal_review_reprocess_result_and_limit(actors):
-    ticket = resolve_ticket(actors, "申诉重办")
+    ticket = resolve_ticket(actors, "申诉重办", with_support=True)
     appeal = request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/appeals", actors["citizen"], {
         "reason": "首次处理未覆盖夜间噪声反复出现的问题", "desired_resolution": "请在夜间再次现场核查",
     })
@@ -131,13 +136,16 @@ def test_appeal_review_reprocess_result_and_limit(actors):
     assert previous_task["status"] == "cancelled"
     detail = request("GET", f"/api/v1/tickets/{ticket['ticket_id']}", actors["staff"])
     assert detail["status"] == "processing" and detail["handling_round"] == 2
+    assert "public_reply" not in detail and detail["resolve_due_at"] > ticket["resolve_due_at"]
     # P0-A: appeal reprocess also uses submit + summary + review-resolve (staff cannot self-resolve).
-    primary = next(item for item in detail["work_orders"] if item["task_type"] == "primary")
-    request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/work-orders/{primary['id']}/submit", actors["staff"], {
-        "version": primary["version"], "remark": "处置完成",
-        "result_summary": "夜间复查完成", "result_measures": "夜间驻点核查并完成整改",
-        "result_outcome": "resolved", "public_content": "已完成夜间复查，问题已整改。",
-    })
+    assert {item["task_type"]: item["status"] for item in detail["work_orders"]} == {"primary": "processing", "support": "pending"}
+    for order in detail["work_orders"]:
+        assert "public_content" not in order and any(entry["action"] == "appeal_reprocess" for entry in order["history"])
+        request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/work-orders/{order['id']}/submit", actors["staff"], {
+            "version": order["version"], "remark": "处置完成",
+            "result_summary": "夜间复查完成", "result_measures": "夜间驻点核查并完成整改",
+            "result_outcome": "resolved", "public_content": "已完成夜间复查，问题已整改。",
+        })
     detail = request("GET", f"/api/v1/tickets/{ticket['ticket_id']}", actors["staff"])
     detail = request("POST", f"/api/v1/tickets/{ticket['ticket_id']}/summary", actors["staff"], {
         "version": detail["version"], "remark": "重新办理复核通过",

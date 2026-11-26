@@ -1,13 +1,12 @@
 import { useState } from 'react'
 import {
-  Alert, Badge, Button, Card, Col, Collapse, DatePicker, Descriptions, Empty,
-  Form, Input, Modal, Popconfirm, Row, Select, Space, Spin, Table, Tabs, Tag,
-  Tooltip, Typography, Upload, message,
+  Alert, Button, Card, Col, Descriptions,
+  Form, Grid, Input, Modal, Popconfirm, Row, Select, Space, Table, Tabs, Tag,
+  Typography, Upload, message,
+  type TableProps,
 } from 'antd'
 import {
-  CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, DownloadOutlined,
-  EditOutlined, FileTextOutlined, InboxOutlined, ReloadOutlined, SearchOutlined,
-  UploadOutlined, WarningOutlined,
+  DownloadOutlined, EditOutlined, InboxOutlined, ReloadOutlined, UploadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../auth/AuthContext'
@@ -20,11 +19,13 @@ import {
 } from '../api/kb'
 import { listDepartments } from '../api/admin'
 import type {
-  KbDocStatus, KbDocFilters, KbDocument, KbFeedback, KbFeedbackType,
+  KbDocStatus, KbDocFilters, KbDocument, KbFeedbackType,
   KbType, KbVisibility,
 } from '../types'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
+import { WorkspaceLoading } from '../components/WorkspaceState'
+import { WorkspaceTableRegion } from '../components/WorkspaceTableRegion'
 
 const { TextArea } = Input
 const { Dragger } = Upload
@@ -128,11 +129,28 @@ function DocumentsTab() {
     onError: e => message.error(e instanceof ApiError ? e.message : '发布失败'),
   })
 
-  const columns = [
+  const compact = !Grid.useBreakpoint().md
+  const documentActions = (_: unknown, r: KbDocument) => (
+    <Space size="small" wrap>
+      {(r.status === 'DRAFT' || r.status === 'REJECTED') && (
+        <Button size="small" type="primary" loading={submitReview.isPending} onClick={() => submitReview.mutate(r.id)}>提交审核</Button>
+      )}
+      {r.status === 'PUBLISHED' && <>
+        <Button size="small" danger loading={withdraw.isPending} onClick={() => withdraw.mutate(r.id)}>下线</Button>
+        <Popconfirm title="确认标记为已失效？" onConfirm={() => expire.mutate(r.id)}><Button size="small">标记失效</Button></Popconfirm>
+      </>}
+      <Button size="small" icon={<ReloadOutlined />} loading={reindex.isPending} onClick={() => reindex.mutate(r.id)}>重建索引</Button>
+      {user?.role === 'admin' && (r.status === 'DRAFT' || r.status === 'REJECTED') && (
+        <Popconfirm title="直接发布此文档？" onConfirm={() => directPublish.mutate(r.id)}><Button size="small" type="primary" ghost>直发</Button></Popconfirm>
+      )}
+    </Space>
+  )
+
+  const columns: NonNullable<TableProps<KbDocument>['columns']> = [
     { title: 'ID', dataIndex: 'id', width: 70 },
-    { title: '标题', dataIndex: 'title', ellipsis: true,
+    { title: '标题', dataIndex: 'title',
       render: (t: string, r: KbDocument) => (
-        <a onClick={() => setSelectedDocId(r.id)}>{t}</a>
+        <button type="button" className="kb-document-link" onClick={() => setSelectedDocId(r.id)}>{t}</button>
       ) },
     { title: '文号', dataIndex: 'doc_number', width: 140, ellipsis: true },
     { title: '类型', dataIndex: 'kb_type', width: 100,
@@ -140,7 +158,7 @@ function DocumentsTab() {
     { title: '公开范围', dataIndex: 'visibility', width: 100,
       render: (v: KbVisibility) => <Tag color={v === 'PUBLIC' ? 'green' : v === 'DEPARTMENT' ? 'blue' : 'red'}>{v}</Tag> },
     { title: '版本', dataIndex: 'version', width: 60 },
-    { title: '状态', dataIndex: 'status', width: 100,
+    { title: '状态', dataIndex: 'status', width: compact ? 80 : 100,
       render: (s: KbDocStatus) => {
         const meta = STATUS_LABELS[s]
         return <Tag color={meta.color}>{meta.label}</Tag>
@@ -149,37 +167,14 @@ function DocumentsTab() {
     { title: '部门', dataIndex: 'department_name', width: 120, ellipsis: true },
     { title: '发布时间', dataIndex: 'published_at', width: 110,
       render: (v?: string | null) => v ? v.slice(0, 10) : '—' },
-    { title: '操作', key: 'actions', width: 280, fixed: 'right' as const,
-      render: (_: unknown, r: KbDocument) => (
-        <Space size="small" wrap>
-          <Button size="small" onClick={() => setSelectedDocId(r.id)}>详情</Button>
-          {(r.status === 'DRAFT' || r.status === 'REJECTED') && (
-            <Button size="small" type="primary" loading={submitReview.isPending} onClick={() => submitReview.mutate(r.id)}>
-              提交审核
-            </Button>
-          )}
-          {r.status === 'PUBLISHED' && (
-            <>
-              <Button size="small" danger loading={withdraw.isPending} onClick={() => withdraw.mutate(r.id)}>下线</Button>
-              <Popconfirm title="确认标记为已失效？" onConfirm={() => expire.mutate(r.id)}>
-                <Button size="small">标记失效</Button>
-              </Popconfirm>
-            </>
-          )}
-          <Button size="small" icon={<ReloadOutlined />} loading={reindex.isPending} onClick={() => reindex.mutate(r.id)}>重建索引</Button>
-          {user?.role === 'admin' && (r.status === 'DRAFT' || r.status === 'REJECTED') && (
-            <Popconfirm title="直接发布此文档？" onConfirm={() => directPublish.mutate(r.id)}>
-              <Button size="small" type="primary" ghost>直发</Button>
-            </Popconfirm>
-          )}
-        </Space>
-      ) },
+    { title: '操作', key: 'actions', width: 280, fixed: 'right', render: documentActions },
   ]
+  const visibleColumns = compact ? columns.filter(column => 'dataIndex' in column && ['title', 'status'].includes(String(column.dataIndex))) : columns
 
   return (
     <>
       <Card className="surface" style={{ marginBottom: 16 }}>
-        <Form layout="inline" onValuesChange={(_, all) => setFilters({ ...all, page: 1 })}>
+        <Form layout="inline" onValuesChange={(_, all) => setFilters(current => ({ ...current, ...all, page: 1 }))}>
           <Form.Item name="keyword" label="关键词">
             <Input allowClear placeholder="标题/文号/关键词" style={{ width: 200 }} />
           </Form.Item>
@@ -202,25 +197,29 @@ function DocumentsTab() {
         </Form>
       </Card>
 
-      <Card className="surface">
+      <Card className="surface" styles={{ body: { padding: compact ? 8 : 16 } }}>
         {list.isError ? (
           <ErrorState error={list.error} retry={() => list.refetch()} />
         ) : (
-          <Table
+          <WorkspaceTableRegion label="知识库文档"><Table<KbDocument>
             rowKey="id"
             size="small"
             loading={list.isLoading}
             dataSource={list.data?.items}
-            columns={columns}
-            scroll={{ x: 1400 }}
+            columns={visibleColumns}
+            scroll={compact ? undefined : { x: 1400 }}
+            expandable={compact ? {
+              expandedRowRender: record => documentActions(null, record),
+              expandIcon: ({ expanded, onExpand, record }) => <Button size="small" type="text" aria-expanded={expanded} aria-label={expanded ? '收起文档操作' : '展开文档操作'} onClick={event => onExpand(record, event)}>{expanded ? '−' : '+'}</Button>,
+            } : undefined}
             pagination={{
               current: list.data?.page || filters.page,
               pageSize: list.data?.page_size || filters.page_size,
               total: list.data?.total || 0,
-              showSizeChanger: true,
+              showSizeChanger: !compact,
               onChange: (page, page_size) => setFilters(f => ({ ...f, page, page_size })),
             }}
-          />
+          /></WorkspaceTableRegion>
         )}
       </Card>
 
@@ -260,11 +259,11 @@ function DocumentDetailDrawer({ docId, onClose }: { docId: number; onClose: () =
       width={900}
     >
       {detail.isLoading ? (
-        <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div>
+        <WorkspaceLoading label="正在加载文档详情" />
       ) : detail.isError ? (
         <ErrorState error={detail.error} retry={() => detail.refetch()} />
       ) : detail.data ? (
-        <Descriptions size="small" column={2} bordered>
+        <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
           <Descriptions.Item label="标题" span={2}>{detail.data.title}</Descriptions.Item>
           <Descriptions.Item label="文号">{detail.data.doc_number || '—'}</Descriptions.Item>
           <Descriptions.Item label="类型"><Tag>{kbTypeLabel(detail.data.kb_type)}</Tag></Descriptions.Item>
@@ -379,7 +378,7 @@ function VersionsModal({ docId, onClose }: { docId: number; onClose: () => void 
   })
   return (
     <Modal open title="版本历史" onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={800}>
-      {versions.isLoading ? <Spin /> : versions.isError ? (
+      {versions.isLoading ? <WorkspaceLoading label="正在加载文档版本" /> : versions.isError ? (
         <ErrorState error={versions.error} retry={() => versions.refetch()} />
       ) : (
         <Table
@@ -408,7 +407,7 @@ function ChunksModal({ docId, onClose }: { docId: number; onClose: () => void })
   })
   return (
     <Modal open title="切片预览" onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={900}>
-      {chunks.isLoading ? <Spin /> : chunks.isError ? (
+      {chunks.isLoading ? <WorkspaceLoading label="正在加载文档切片" /> : chunks.isError ? (
         <ErrorState error={chunks.error} retry={() => chunks.refetch()} />
       ) : (
         <>
@@ -654,30 +653,33 @@ function FeedbackTab() {
       {list.isError ? (
         <ErrorState error={list.error} retry={() => list.refetch()} />
       ) : (
-        <Table
-          rowKey="id"
-          size="small"
-          loading={list.isLoading}
-          dataSource={list.data?.items}
-          pagination={{
-            current: page, pageSize: 20, total: list.data?.total || 0,
-            onChange: setPage,
-          }}
-          columns={[
-            { title: '时间', dataIndex: 'created_at', width: 150,
-              render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
-            { title: '反馈类型', dataIndex: 'feedback_type', width: 100,
-              render: (t: KbFeedbackType) => {
-                const map = { helpful: { c: 'green', l: '有帮助' }, inaccurate: { c: 'red', l: '不准确' }, outdated: { c: 'orange', l: '过时' }, no_answer: { c: 'default', l: '未解答' } }
-                return <Tag color={map[t].c}>{map[t].l}</Tag>
-              } },
-            { title: '来源路由', dataIndex: 'route', width: 120 },
-            { title: '问题', dataIndex: 'query_text', ellipsis: true },
-            { title: '引用文档', dataIndex: 'document_ids', width: 140,
-              render: (ids: string[]) => ids.join(', ') || '—' },
-            { title: '评论', dataIndex: 'comment', ellipsis: true },
-          ]}
-        />
+        <WorkspaceTableRegion label="政策反馈列表">
+          <Table
+            rowKey="id"
+            size="small"
+            scroll={{ x: 760 }}
+            loading={list.isLoading}
+            dataSource={list.data?.items}
+            pagination={{
+              current: page, pageSize: 20, total: list.data?.total || 0,
+              onChange: setPage,
+            }}
+            columns={[
+              { title: '时间', dataIndex: 'created_at', width: 150,
+                render: (v: string) => v?.replace('T', ' ').slice(0, 19) },
+              { title: '反馈类型', dataIndex: 'feedback_type', width: 100,
+                render: (t: KbFeedbackType) => {
+                  const map = { helpful: { c: 'green', l: '有帮助' }, inaccurate: { c: 'red', l: '不准确' }, outdated: { c: 'orange', l: '过时' }, no_answer: { c: 'default', l: '未解答' } }
+                  return <Tag color={map[t].c}>{map[t].l}</Tag>
+                } },
+              { title: '来源路由', dataIndex: 'route', width: 120 },
+              { title: '问题', dataIndex: 'query_text', ellipsis: true },
+              { title: '引用文档', dataIndex: 'document_ids', width: 140,
+                render: (ids: string[]) => ids.join(', ') || '—' },
+              { title: '评论', dataIndex: 'comment', ellipsis: true },
+            ]}
+          />
+        </WorkspaceTableRegion>
       )}
     </Card>
   )

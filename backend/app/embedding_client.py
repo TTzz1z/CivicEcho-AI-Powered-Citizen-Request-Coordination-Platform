@@ -21,6 +21,9 @@ import urllib.request
 from dataclasses import dataclass
 
 from .config import get_settings
+from .model_governance import read_model_response
+from .telemetry import observed
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +129,10 @@ class EmbeddingClient:
             fallback=True,
         ) for t in texts]
 
+    @observed("embedding.remote")
     def _call_api(self, texts: list[str]) -> list[EmbeddingResult]:
+        trace.get_current_span().set_attribute("model.name", self.model)
+        trace.get_current_span().set_attribute("embedding.version", EMBEDDING_VERSION)
         payload = json.dumps({
             "model": self.model,
             "input": texts,
@@ -141,8 +147,9 @@ class EmbeddingClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            result = json.loads(response.read())
+        result = json.loads(read_model_response(
+            request, self.timeout, sum(len(item.encode("utf-8")) for item in texts)
+        ))
         data_items = result.get("data", [])
         usage = _parse_embedding_usage(result.get("usage"))
         model_name = result.get("model", self.model)

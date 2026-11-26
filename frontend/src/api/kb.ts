@@ -1,9 +1,10 @@
-import { api } from './client'
+import { ApiError, api } from './client'
+import { consumeSseStream, openSseFetch } from './sse'
 import type {
-  ApiSuccess, KbChunkPage, KbDocCreatePayload, KbDocFilters, KbDocPage,
+  ApiSuccess, KbChunkPage, KbCitation, KbDocCreatePayload, KbDocFilters, KbDocPage,
   KbDocUpdatePayload, KbDocument, KbDocumentDetail, KbEvalCase,
-  KbEvalCasePayload, KbEvalRunResult, KbFeedback, KbFeedbackPage,
-  KbFeedbackPayload, KbNoAnswer, KbNoAnswerPage, KbNoAnswerStatus,
+  KbEvalCasePayload, KbEvalRunResult, KbFeedbackPage,
+  KbFeedbackPayload, KbNoAnswerPage, KbNoAnswerStatus,
   KbRagAnswer, KbRagQuery, KbRetrievalResult, KbTicketAdvice,
   KbUploadPayload,
 } from '../types'
@@ -83,6 +84,83 @@ export async function listKbChunks(docId: number, page = 1, pageSize = 20): Prom
 
 export async function ragQuery(payload: KbRagQuery): Promise<KbRagAnswer> {
   return (await api.post<ApiSuccess<KbRagAnswer>>(`${BASE}/query`, payload, { timeout: 60_000 })).data.data
+}
+
+export interface KbRagStreamMeta {
+  citations: KbCitation[]
+  no_evidence: boolean
+  retrieval_count: number
+  route: string
+  advisory_only?: boolean
+}
+
+export interface KbRagStreamDone extends KbRagAnswer {
+  usage_unavailable?: boolean
+  advisory_only?: boolean
+}
+
+export interface KbRagStreamHandlers {
+  onMeta?: (meta: KbRagStreamMeta) => void
+  onDelta?: (text: string) => void
+  onDone?: (done: KbRagStreamDone) => void
+  onError?: (err: { code: string; message: string }) => void
+}
+
+export async function streamRagQuery(
+  payload: KbRagQuery,
+  handlers: KbRagStreamHandlers = {},
+  signal?: AbortSignal,
+): Promise<KbRagStreamDone> {
+  const response = await openSseFetch(`/api/v1${BASE}/query/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+    clearAuthOn401: true,
+  })
+  if (!response.body) {
+    throw new ApiError(0, 'STREAM_INCOMPLETE', '知识库流式响应不可用，请重试')
+  }
+
+  const state: { done: KbRagStreamDone | null; err: ApiError | null } = {
+    done: null,
+    err: null,
+  }
+
+  await consumeSseStream(
+    response.body,
+    ev => {
+      if (!ev.data) return
+      let parsed: Record<string, unknown>
+      try {
+        parsed = JSON.parse(ev.data) as Record<string, unknown>
+      } catch {
+        return
+      }
+      if (ev.event === 'meta') {
+        handlers.onMeta?.(parsed as unknown as KbRagStreamMeta)
+      } else if (ev.event === 'delta') {
+        if (typeof parsed.text === 'string') handlers.onDelta?.(parsed.text)
+      } else if (ev.event === 'done') {
+        const done = parsed as unknown as KbRagStreamDone
+        state.done = done
+        handlers.onDone?.(done)
+      } else if (ev.event === 'error') {
+        const code = typeof parsed.code === 'string' ? parsed.code : 'STREAM_ERROR'
+        const message = typeof parsed.message === 'string' ? parsed.message : '知识库流式问答暂时不可用，请重试。'
+        handlers.onError?.({ code, message })
+        state.err = new ApiError(500, code, message)
+      }
+    },
+    signal,
+  )
+
+  if (state.err) throw state.err
+  if (!state.done) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    throw new ApiError(0, 'STREAM_INCOMPLETE', '知识库流式响应意外中断，请重试')
+  }
+  return state.done
 }
 
 export async function ragRetrieve(payload: KbRagQuery): Promise<KbRetrievalResult> {

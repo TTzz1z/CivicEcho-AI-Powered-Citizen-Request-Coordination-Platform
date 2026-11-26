@@ -22,7 +22,7 @@ import uuid
 import requests
 
 BASE = os.environ.get("ACCEPTANCE_BASE_URL", "http://localhost:8001/api/v1")
-PASSWORD = os.environ.get("SEED_PASSWORD", "tingting-seed-demo-2026")
+PASSWORD = os.environ["SEED_PASSWORD"]
 
 PASS = 0
 FAIL = 0

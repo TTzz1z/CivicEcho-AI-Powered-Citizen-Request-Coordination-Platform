@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
@@ -26,6 +26,12 @@ describe('PolicyCitations helpers', () => {
     expect(filterDisplayCitations([complete], true)).toEqual([])
     expect(filterDisplayCitations([complete], false)).toHaveLength(1)
   })
+
+  it('omits expired evidence', () => {
+    expect(filterDisplayCitations([{ ...complete, is_expired: true }], false)).toEqual([])
+    expect(filterDisplayCitations([{ ...complete, expires_at: '2001-01-01T00:00:00Z' }], false)).toEqual([])
+    expect(filterDisplayCitations([{ ...complete, status: 'WITHDRAWN' }], false)).toEqual([])
+  })
 })
 
 describe('PolicyCitations UI', () => {
@@ -39,7 +45,7 @@ describe('PolicyCitations UI', () => {
     expect(screen.queryByTestId('policy-citations')).not.toBeInTheDocument()
   })
 
-  it('renders title, doc number, authority and detail link', async () => {
+  it('opens the cited evidence in place for a visitor', async () => {
     render(
       <MemoryRouter>
         <PolicyCitations citations={[complete]} />
@@ -50,6 +56,9 @@ describe('PolicyCitations UI', () => {
     expect(screen.getByText('市政发〔2024〕1号')).toBeInTheDocument()
     expect(screen.getByText('市政管理处')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /路灯维修办法/ }))
-    expect(screen.getByTestId('citation-link-1')).toHaveAttribute('href', '/citizen/policy?doc=9')
+    await userEvent.click(screen.getByRole('button', { name: '查看详情：路灯维修办法' }))
+    const details = await screen.findByRole('dialog', { name: '路灯维修办法' })
+    expect(within(details).getByText(complete.excerpt!)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '查看详情' })).not.toBeInTheDocument()
   })
 })

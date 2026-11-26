@@ -7,7 +7,7 @@ const FORBIDDEN_ENGLISH = [
   "I'm having a issue with my email",
   "What's the status of the ticket I opened",
   'What is your email address',
-  'I am a bot, powered by Rasa',
+  'I am a bot',
 ]
 
 const CJK_RE = /[\u4e00-\u9fff]/g

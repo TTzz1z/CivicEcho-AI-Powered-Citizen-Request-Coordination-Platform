@@ -209,7 +209,7 @@ def test_production_settings_reject_weak_secrets(monkeypatch):
         Settings(**_strong_prod_kwargs(malware_scan_mode="disabled", malware_scan_require_clean=False))
     with pytest.raises(ValidationError):
         Settings(**_strong_prod_kwargs(database_url="postgresql+psycopg://tingting:change-me@postgres:5432/tingting"))
-    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-2026")
+    monkeypatch.setenv("SEED_PASSWORD", "tingting-seed-demo-fixture")
     with pytest.raises(ValidationError):
         Settings(**_strong_prod_kwargs())
     monkeypatch.delenv("SEED_PASSWORD", raising=False)

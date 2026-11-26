@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy.orm import Session
@@ -312,15 +311,11 @@ class AiUsageRecorder:
         if self.db is None:
             return
         try:
-            row = AiUsageLogModel(**fields)
-            self.db.add(row)
-            self.db.commit()
+            with Session(bind=self.db.get_bind()) as audit_db:
+                audit_db.add(AiUsageLogModel(**fields))
+                audit_db.commit()
         except Exception as exc:  # pragma: no cover — best-effort
             logger.warning("ai_usage_logs write failed (best-effort): %s", exc)
-            try:
-                self.db.rollback()
-            except Exception:
-                pass
 
 
 def _derive_provider_from_model(model_name: str) -> str:

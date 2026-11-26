@@ -1,17 +1,21 @@
 param(
   [string]$Output = "backups\tingting-$((Get-Date).ToString('yyyyMMdd-HHmmss')).dump",
-  [string]$Project = ''
+  [string]$Project = '',
+  [switch]$Production,
+  [string]$EnvFile
 )
 $ErrorActionPreference = 'Stop'
-$compose = @('compose')
-if ($Project) { $compose += @('-p', $Project) }
-$container = (docker @compose ps -q postgres).Trim()
-if (-not $container) { throw 'PostgreSQL container is not running.' }
-docker exec $container sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/tingting-backup.dump'
-if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed.' }
-$absolute = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Output))
-New-Item -ItemType Directory -Force (Split-Path $absolute) | Out-Null
-docker cp "${container}:/tmp/tingting-backup.dump" $absolute
-docker exec $container rm -f /tmp/tingting-backup.dump | Out-Null
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $absolute)) { throw 'Backup copy failed.' }
+. "$PSScriptRoot\backup-common.ps1"
+Initialize-CivicCompose -Project $Project -Production:$Production -EnvFile $EnvFile
+$absolute = Get-CivicAbsolutePath $Output
+if (Test-Path -LiteralPath $absolute) { throw 'The backup destination already exists.' }
+New-Item -ItemType Directory -Force -Path (Split-Path $absolute) | Out-Null
+$nativeDump = "/tmp/civicecho-backup-$([guid]::NewGuid().ToString('N')).dump"
+try {
+  Invoke-CivicCompose @('exec', '-T', 'postgres', 'sh', '-c',
+                        'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f "$1"', 'sh', $nativeDump)
+  Invoke-CivicCompose @('cp', "postgres:${nativeDump}", $absolute)
+} finally {
+  Clear-CivicNativeDump $nativeDump
+}
 Write-Output $absolute

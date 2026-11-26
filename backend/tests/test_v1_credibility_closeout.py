@@ -1,7 +1,7 @@
 """Credibility closeout: KB lock/publish, embedding isolation, malware, advice_id, WO tx."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -79,8 +79,8 @@ def headers(actor):
     return {"Authorization": f"Bearer {create_access_token(actor['id'], actor['role'])}"}
 
 
-def test_embedding_fallback_not_written_to_pgvector():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_embedding_fallback_not_written_to_pgvector(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         doc = KbDocumentModel(
             title=f"embed-iso-{uuid4().hex[:8]}",
@@ -115,8 +115,8 @@ def test_embedding_fallback_not_written_to_pgvector():
         assert all(r.empty for r in rows)
 
 
-def test_index_in_progress_returns_409():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_index_in_progress_returns_409(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         doc = KbDocumentModel(
             title=f"lock-{uuid4().hex[:8]}",
@@ -126,6 +126,8 @@ def test_index_in_progress_returns_409():
             status="DRAFT",
             parse_status="parsing",
             index_status="building",
+            index_lease_token="active-fixture",
+            index_lease_until=datetime.now(timezone.utc) + timedelta(minutes=1),
             raw_content="锁测试正文。",
         )
         db.add(doc)
@@ -138,8 +140,8 @@ def test_index_in_progress_returns_409():
         assert exc.value.status_code == 409
 
 
-def test_publish_failure_keeps_old_published_retrievable():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_publish_failure_keeps_old_published_retrievable(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         old = KbDocumentModel(
             title=f"old-{uuid4().hex[:8]}",
@@ -199,8 +201,8 @@ def test_publish_failure_keeps_old_published_retrievable():
         assert live and "路灯" in live[0].content
 
 
-def test_kb_upload_rejects_eicar_before_storage():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_kb_upload_rejects_eicar_before_storage(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         svc = KnowledgeBaseService(db)
         infected = ScanResult("infected", "clamd", "Eicar", datetime.now(timezone.utc))
@@ -218,8 +220,8 @@ def test_kb_upload_rejects_eicar_before_storage():
             assert exc.value.status_code == 422
 
 
-def test_kb_upload_scanner_down_is_503_when_required():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_kb_upload_scanner_down_is_503_when_required(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         svc = KnowledgeBaseService(db)
         err = ScanResult("error", "clamd", "down", datetime.now(timezone.utc))
@@ -238,8 +240,8 @@ def test_kb_upload_scanner_down_is_503_when_required():
             assert exc.value.status_code == 503
 
 
-def test_kb_upload_rejects_spoofed_pdf():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_kb_upload_rejects_spoofed_pdf(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         svc = KnowledgeBaseService(db)
         clean = ScanResult("clean", "disabled", None, datetime.now(timezone.utc))
@@ -256,12 +258,12 @@ def test_kb_upload_rejects_spoofed_pdf():
             assert exc.value.code == "ATTACHMENT_SIGNATURE_MISMATCH"
 
 
-def test_kb_upload_rejects_zip_bomb_docx():
+def test_kb_upload_rejects_zip_bomb_docx(persisted_kb_admin):
     """OOXML with too many entries must be rejected before MinIO."""
     import io
     import zipfile
 
-    principal = Principal("user", 1, "admin_local", "admin", None)
+    principal = persisted_kb_admin
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
         zf.writestr(
@@ -418,9 +420,9 @@ def test_assign_rolls_back_when_work_order_create_fails(actors):
         assert orders == []
 
 
-def test_concurrent_reindex_second_request_gets_409():
+def test_concurrent_reindex_second_request_gets_409(persisted_kb_admin):
     """While building, a second FOR UPDATE path must refuse with INDEX_IN_PROGRESS."""
-    principal = Principal("user", 1, "admin_local", "admin", None)
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         doc = KbDocumentModel(
             title=f"concurrent-{uuid4().hex[:8]}",
@@ -437,18 +439,18 @@ def test_concurrent_reindex_second_request_gets_409():
         db.refresh(doc)
         doc_id = doc.id
 
-    # Session A marks building under lock, then Session B must 409.
-    with SessionLocal() as db_a:
-        locked = db_a.scalar(
-            select(KbDocumentModel).where(KbDocumentModel.id == doc_id).with_for_update()
-        )
-        locked.index_status = "building"
-        locked.parse_status = "parsing"
-        db_a.commit()
-
     with SessionLocal() as db_b:
         svc = KnowledgeBaseService(db_b)
         doc_b = db_b.get(KbDocumentModel, doc_id)
+        assert doc_b.index_status == "pending"
+        # B already has a cached ORM object when A commits the claim.
+        with SessionLocal() as db_a:
+            locked = db_a.get(KbDocumentModel, doc_id)
+            locked.index_status = "building"
+            locked.parse_status = "parsing"
+            locked.index_lease_token = "first-builder"
+            locked.index_lease_until = datetime.now(timezone.utc) + timedelta(minutes=1)
+            db_a.commit()
         with pytest.raises(BusinessError) as exc:
             svc._parse_and_index(doc_b, principal)
         assert exc.value.code == "INDEX_IN_PROGRESS"

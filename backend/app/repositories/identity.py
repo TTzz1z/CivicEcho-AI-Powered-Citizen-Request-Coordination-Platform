@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import Optional
 
@@ -15,6 +17,14 @@ class UserRepository:
 
     def get_by_username(self, username: str) -> Optional[UserModel]:
         return self.db.scalar(select(UserModel).where(UserModel.username == username))
+
+    def get_by_username_ci(self, username: str) -> Optional[UserModel]:
+        return self.db.scalar(
+            select(UserModel).where(func.lower(UserModel.username) == username.strip().lower())
+        )
+
+    def rollback(self) -> None:
+        self.db.rollback()
 
     def get_by_oidc_subject(self, subject: str) -> Optional[UserModel]:
         return self.db.scalar(select(UserModel).where(UserModel.oidc_subject == subject))
@@ -165,3 +175,30 @@ class AuditRepository:
             .offset((page - 1) * page_size).limit(page_size)
         ).all())
         return items, total
+
+    def list_for_export(
+        self,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        q: str | None = None,
+        limit: int = 5000,
+    ) -> list[AuditLogModel]:
+        statement = select(AuditLogModel)
+        if action and action.strip():
+            statement = statement.where(AuditLogModel.action == action.strip())
+        if outcome and outcome.strip():
+            statement = statement.where(AuditLogModel.outcome == outcome.strip())
+        if q and q.strip():
+            term = f"%{q.strip()}%"
+            statement = statement.where(or_(
+                AuditLogModel.action.ilike(term),
+                AuditLogModel.outcome.ilike(term),
+                AuditLogModel.resource_type.ilike(term),
+                AuditLogModel.resource_id.ilike(term),
+                AuditLogModel.details.ilike(term),
+                AuditLogModel.request_id.ilike(term),
+            ))
+        return list(self.db.scalars(
+            statement.order_by(AuditLogModel.created_at.desc(), AuditLogModel.id.desc()).limit(limit)
+        ).all())

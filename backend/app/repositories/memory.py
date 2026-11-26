@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 
 from ..authorization import AuthorizationPolicy, Principal
 from ..models import TicketFeedbackModel, TicketModel, TicketStatusHistoryModel
-from ..schemas import TicketQuery
+from ..schemas import TicketFilterQuery, TicketQuery
 from .base import CreateResult, PageResult, TicketRepository
 
 
@@ -60,7 +62,7 @@ class InMemoryTicketRepository(TicketRepository):
     def get(self, ticket_id: str):
         return self._tickets.get(ticket_id.upper())
 
-    def list(self, query: TicketQuery, principal: Principal) -> PageResult:
+    def _filter_items(self, query: TicketFilterQuery, principal: Principal) -> list[TicketModel]:
         items = [item for item in self._tickets.values() if AuthorizationPolicy.can_view(principal, item)]
         if query.status:
             items = [x for x in items if x.status == query.status]
@@ -72,22 +74,36 @@ class InMemoryTicketRepository(TicketRepository):
             items = [x for x in items if x.category_id == query.category_id]
         if query.priority:
             items = [x for x in items if x.priority == query.priority]
+        if query.created_from:
+            items = [x for x in items if x.created_at >= query.created_from]
+        if query.created_to:
+            items = [x for x in items if x.created_at < query.created_to]
         if query.keyword:
-            word = query.keyword.lower()
+            word = query.keyword.strip().lower()
             # Align with postgres: ticket numbers (QT…) match ticket_id; free text hits description/location/event.
             items = [
                 x for x in items
                 if word in f"{x.ticket_id} {x.description} {x.location} {x.event or ''}".lower()
             ]
-        if query.mine:
-            items = [x for x in items if x.creator_user_id == principal.user_id]
+        if query.mine and principal.role != "citizen":
+            if principal.role == "department_staff":
+                items = [x for x in items if x.assigned_user_id == principal.user_id]
+            else:
+                items = [x for x in items if x.creator_user_id == principal.user_id]
         if query.my_department:
             items = [x for x in items if x.assigned_department_id == principal.department_id]
         reverse = query.order == "desc"
         items.sort(key=lambda x: getattr(x, query.sort), reverse=reverse)
+        return items
+
+    def list(self, query: TicketQuery, principal: Principal) -> PageResult:
+        items = self._filter_items(query, principal)
         total = len(items)
         start = (query.page - 1) * query.page_size
         return PageResult(items[start:start + query.page_size], total)
+
+    def list_for_export(self, query: TicketFilterQuery, principal: Principal, *, limit: int = 5000) -> list[TicketModel]:
+        return self._filter_items(query, principal)[:limit]
 
     def transition(self, ticket_id, expected_version, status, operation_type, content, operator_user_id, updates,
                    visibility="internal", *, commit: bool = True):

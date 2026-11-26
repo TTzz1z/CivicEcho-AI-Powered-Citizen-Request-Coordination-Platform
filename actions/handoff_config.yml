@@ -1,2 +1,0 @@
-# Optional legacy handoff targets. Prefer HANDOFF_* environment variables.
-handoff_hosts: {}

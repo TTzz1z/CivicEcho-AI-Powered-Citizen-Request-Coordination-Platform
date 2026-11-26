@@ -1,7 +1,7 @@
 """Demo environment: deterministic one-click reset + seed.
 
 Usage:
-    SEED_PASSWORD=tingting-seed-demo-2026 \\
+    SEED_PASSWORD="<configured-demo-password>" \\
       python -m scripts.demo_reset --confirm-reset
 
 Safety guards (Round-1):
@@ -191,11 +191,12 @@ def _cleanup_minio_demo_prefixes() -> None:
         print(f"  skip MinIO cleanup (import): {exc}")
         return
 
-    prefixes = ("demo/", "e2e/", "test/", "docs/")
+    base_prefixes = ("demo/", "e2e/", "test/", "docs/")
     for label, factory in (
         ("attachments", get_object_storage),
         ("kb", get_kb_object_storage),
     ):
+        prefixes = (*base_prefixes, "tickets/") if label == "attachments" else base_prefixes
         try:
             storage = factory()
             client = getattr(storage, "_client", None)

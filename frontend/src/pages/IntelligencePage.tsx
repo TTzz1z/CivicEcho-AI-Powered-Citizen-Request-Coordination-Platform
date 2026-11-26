@@ -4,7 +4,7 @@ import {
 } from 'antd'
 import { BulbOutlined, CloudSyncOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import {
   analyzeTicket, listHotspots, listIntegrationStatuses, listSuggestions, reviewSuggestion,
@@ -15,6 +15,7 @@ import { ApiError } from '../api/client'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
 import { CitizenPreReview } from './CitizenPreReview'
+import { AgentTriagePage } from './AgentTriagePage'
 
 const TRIAGE_TYPES: AiSuggestionType[] = ['triage_assistant']
 const HANDLING_TYPES: AiSuggestionType[] = ['handling_assistant']
@@ -178,11 +179,13 @@ function ResultBody({ item }: { item: AiSuggestion }) {
 export function IntelligencePage() {
   const { user } = useAuth()
   if (user?.role === 'citizen') return <CitizenPreReview />
+  if (user?.role === 'agent') return <AgentTriagePage />
   return <StaffAiWorkbench />
 }
 
 function StaffAiWorkbench() {
   const { user } = useAuth()
+  const [params] = useSearchParams()
   const qc = useQueryClient()
   const [form] = Form.useForm<{ ticket_id: string }>()
   const [suggestions, setSuggestions] = useState<AiSuggestion[]>([])
@@ -264,11 +267,13 @@ function StaffAiWorkbench() {
       <Card className="surface" title={isDept ? '按已派发工单生成办件建议' : '按待受理/已受理工单生成分诊建议'} extra={<BulbOutlined />}>
         <Form
           form={form}
+          className="ticket-filter-form"
           layout="inline"
+          initialValues={{ ticket_id: isDept ? params.get('ticket') ?? undefined : undefined }}
           onFinish={(v) => { setSuggestions([]); analyze.mutate(v.ticket_id) }}
         >
-          <Form.Item name="ticket_id" label="工单编号" rules={[{ required: true, message: '请输入工单编号' }]}>
-            <Input aria-label="工单编号" placeholder="QT2026071400000001" style={{ width: 240 }} />
+          <Form.Item name="ticket_id" label="工单编号" className="ticket-keyword" rules={[{ required: true, message: '请输入工单编号' }]}>
+            <Input aria-label="工单编号" placeholder="输入工单编号" />
           </Form.Item>
           <Form.Item>
             <Space wrap>

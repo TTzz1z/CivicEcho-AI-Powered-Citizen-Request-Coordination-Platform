@@ -1,19 +1,23 @@
 import hashlib
 import json
 import re
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from ..ai_schemas import (
     FABRICATED_HANDLING_FACTS,
+    contains_prompt_leakage_or_mutation,
     validate_handling_response,
+    validate_legacy_ai_payload,
+    validate_pre_review_response,
     validate_triage_response,
 )
 from ..authorization import AuthorizationPolicy, Principal
 from ..errors import BusinessError, PermissionDenied, TicketNotFound
 from ..llm_client import get_llm_client
-from ..logging_config import request_id_context
+from ..logging_config import redact_for_llm, request_id_context
 from ..models import AiSuggestionModel
 from ..schemas import AiSuggestionRead, HotspotRead, PreReviewRequest, PreReviewResult
 from .ai_usage_recorder import (
@@ -336,6 +340,7 @@ class AiService:
 
     @staticmethod
     def _sanitize_triage_payload(payload: dict) -> dict:
+        payload = dict(payload)
         blob = json.dumps(payload, ensure_ascii=False)
         for phrase in TRIAGE_FORBIDDEN:
             if phrase in blob:
@@ -349,7 +354,7 @@ class AiService:
         for phrase in TRIAGE_FORBIDDEN:
             notice = notice.replace(phrase, "")
         payload["intake_notice_draft"] = notice.strip() or DEFAULT_INTAKE_NOTICE
-        payload["advisory_only"] = True
+        payload.setdefault("advisory_only", True)
         payload["capability"] = CAP_TRIAGE_ASSISTANT
         return payload
 
@@ -480,13 +485,17 @@ class AiService:
                     candidate = llm_result.data
                     accepted = True
                     if suggestion_type == CAP_TRIAGE_ASSISTANT:
-                        candidate = self._sanitize_triage_payload(candidate)
-                        checked = validate_triage_response(candidate)
-                        if not checked.ok:
+                        if contains_prompt_leakage_or_mutation(json.dumps(candidate, ensure_ascii=False)):
                             accepted = False
-                            schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
+                            schema_reject_reason = "prompt_guard_triggered"
                         else:
-                            candidate = checked.data
+                            candidate = self._sanitize_triage_payload(candidate)
+                            checked = validate_triage_response(candidate)
+                            if not checked.ok:
+                                accepted = False
+                                schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
+                            else:
+                                candidate = checked.data
                     elif suggestion_type == CAP_HANDLING_ASSISTANT:
                         facts_ok = self._handling_facts_sufficient(ticket)
                         if not facts_ok:
@@ -495,6 +504,13 @@ class AiService:
                             if not candidate.get("reply_template"):
                                 candidate["reply_template"] = PLACEHOLDER_REPLY
                         checked = validate_handling_response(candidate, facts_sufficient=facts_ok)
+                        if not checked.ok:
+                            accepted = False
+                            schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
+                        else:
+                            candidate = checked.data
+                    else:
+                        checked = validate_legacy_ai_payload(suggestion_type, candidate)
                         if not checked.ok:
                             accepted = False
                             schema_reject_reason = checked.degrade_reason or "schema_validation_failed"
@@ -536,6 +552,8 @@ class AiService:
                     )
                 built = builders[suggestion_type](ticket)
                 payload, confidence = built[0], built[1]
+                if isinstance(payload, dict):
+                    payload = {**payload, "advisory_only": True}
                 if confidence is None:
                     confidence = 0
                 provider = "rules"
@@ -544,6 +562,8 @@ class AiService:
                 degraded = True
                 degrade_reason = rules_reason
                 usage_unavailable = True
+            if isinstance(payload, dict):
+                payload["advisory_only"] = True
             if suggestion_type in {CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}:
                 payload = self._stamp_degrade_meta(
                     payload,
@@ -553,6 +573,7 @@ class AiService:
                     degrade_reason=degrade_reason,
                     usage_unavailable=usage_unavailable,
                 )
+                payload["latency_ms"] = latency_ms
             risk_level = payload.get("level", "attention" if payload.get("possible_duplicate") else "none")
             if suggestion_type in {CAP_TRIAGE_ASSISTANT, CAP_HANDLING_ASSISTANT}:
                 urgency = (payload.get("urgency") or {})
@@ -590,22 +611,22 @@ class AiService:
         return result
 
     def _llm_context(self, ticket, suggestion_type: str) -> dict:
-        """Build context dict for LLM prompt."""
+        """Build PII-redacted context dict for external LLM prompts (never includes raw contact)."""
         departments = [d.name for d in self.repository.active_departments()]
         assigned = ticket.department.name if getattr(ticket, "department", None) else "未派发"
         return {
             "ticket_id": ticket.ticket_id,
             "status": ticket.status or "",
             "request_type": ticket.request_type or "未指定",
-            "description": ticket.description or "",
-            "location": ticket.location or "未知",
-            "event": ticket.event or "",
+            "description": redact_for_llm(ticket.description or ""),
+            "location": redact_for_llm(ticket.location or "未知"),
+            "event": redact_for_llm(ticket.event or ""),
             "occurred_at_text": ticket.occurred_at_text or "未提供",
             "priority": ticket.priority or "normal",
             "category_name": ticket.category.name if ticket.category else "未分类",
-            "resolution_summary": ticket.resolution_summary or "暂无",
-            "resolution_measures": ticket.resolution_measures or "暂无",
-            "public_reply": ticket.public_reply or "暂无",
+            "resolution_summary": redact_for_llm(ticket.resolution_summary or "暂无"),
+            "resolution_measures": redact_for_llm(ticket.resolution_measures or "暂无"),
+            "public_reply": redact_for_llm(ticket.public_reply or "暂无"),
             "departments": "、".join(departments) if departments else "无可用部门",
             "assigned_department": assigned,
             "facts_sufficient": "是" if self._handling_facts_sufficient(ticket) else "否",
@@ -716,11 +737,11 @@ class AiService:
 
         if llm.available:
             context = {
-                "description": description,
+                "description": redact_for_llm(description),
                 "request_type": request_type or "未指定",
-                "location": location or "未提供",
-                "occurred_at_text": occurred_at_text or "未提供",
-                "target": target or "未提供",
+                "location": redact_for_llm(location or "未提供"),
+                "occurred_at_text": redact_for_llm(occurred_at_text or "未提供"),
+                "target": redact_for_llm(target or "未提供"),
             }
             llm_result = llm.complete("pre_review", context)
             # P0-D: record every pre-review LLM call with real usage
@@ -732,15 +753,24 @@ class AiService:
                 degrade_reason="llm_call_failed" if not llm_result.success else None,
             )
             if llm_result.success and llm_result.data:
-                data = llm_result.data
-                provider = "deepseek"
-                identified_type = data.get("identified_type", identified_type)
-                identified_location = data.get("identified_location", identified_location)
-                identified_time = data.get("identified_time", identified_time)
-                identified_target = data.get("identified_target", identified_target)
-                impact = data.get("impact", impact)
-                urgency_hint = data.get("urgency_hint", urgency_hint)
-                normalized_description = data.get("normalized_description", normalized_description)
+                checked = validate_pre_review_response(llm_result.data)
+                if checked.ok and checked.data:
+                    data = checked.data
+                    provider = llm.provider or "deepseek"
+                    identified_type = data["identified_type"]
+                    identified_location = data["identified_location"]
+                    identified_time = data["identified_time"]
+                    identified_target = data["identified_target"]
+                    impact = data["impact"]
+                    urgency_hint = data["urgency_hint"]
+                    normalized_description = data["normalized_description"]
+                else:
+                    recorder.record_rules_call(
+                        make_context(CAP_PRE_REVIEW, route="pre_review",
+                                     principal=principal, request_id=request_id),
+                        model_name="rules",
+                        degrade_reason=checked.degrade_reason or "schema_validation_failed",
+                    )
         else:
             # LLM unavailable: record rules-tier path honestly
             recorder.record_rules_call(
@@ -856,6 +886,7 @@ class AiService:
         Delegates to KB-powered ticket_advice so advice is grounded in the RAG
         knowledge base with citations. Falls back to rules if KB unavailable.
         """
+        started = time.perf_counter()
         from ..authorization import AuthorizationPolicy
         from ..errors import PermissionDenied, TicketNotFound
         ticket = self.repository.ticket(ticket_id)
@@ -882,7 +913,7 @@ class AiService:
                          "no_evidence": advice.get("no_evidence"),
                          "source": "kb_rag"},
             )
-            return advice
+            return {**advice, "latency_ms": round((time.perf_counter() - started) * 1000)}
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning("KB ticket_advice failed: %s", exc)
@@ -910,6 +941,8 @@ class AiService:
             "no_evidence": True,
             "provider": "rules",
             "model": "rules-fallback",
+            "degraded": True,
+            "degrade_reason": "kb_unavailable",
             "advisory_only": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -922,4 +955,4 @@ class AiService:
         except Exception:
             advice_id = str(uuid4())
             advice["advice_id"] = advice_id
-        return advice
+        return {**advice, "latency_ms": round((time.perf_counter() - started) * 1000)}

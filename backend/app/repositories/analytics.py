@@ -1,9 +1,11 @@
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload
 
-from ..models import DepartmentModel, TicketModel
+from ..config import get_settings
+from ..models import CategoryModel, DepartmentModel, TicketModel
 
 
 class AnalyticsRepository:
@@ -24,12 +26,26 @@ class AnalyticsRepository:
         ).all()
         return [(name, int(value)) for name, value in rows]
 
+    def daily_intake(self, start: date, stop: date, timezone_name: str):
+        zone = ZoneInfo(timezone_name)
+        day = func.date(func.timezone(timezone_name, TicketModel.created_at))
+        rows = self.db.execute(
+            select(day, func.count(TicketModel.id))
+            .where(
+                TicketModel.created_at >= datetime.combine(start, time.min, tzinfo=zone),
+                TicketModel.created_at < datetime.combine(stop, time.min, tzinfo=zone),
+            )
+            .group_by(day)
+        ).all()
+        return {key: int(value) for key, value in rows}
+
     def recent(self, limit=8):
         return list(self.db.scalars(
             select(TicketModel).options(
-                selectinload(TicketModel.department),
-                selectinload(TicketModel.creator),
-                selectinload(TicketModel.assignee),
+                joinedload(TicketModel.department),
+                joinedload(TicketModel.creator),
+                joinedload(TicketModel.assignee),
+                joinedload(TicketModel.category).joinedload(CategoryModel.parent).joinedload(CategoryModel.parent),
             ).order_by(TicketModel.created_at.desc()).limit(limit)
         ).all())
 
@@ -39,18 +55,22 @@ class AnalyticsRepository:
         active_deadline = case((TicketModel.status == "pending", TicketModel.accept_due_at), else_=TicketModel.resolve_due_at)
         soon = int(self.db.scalar(select(func.count(TicketModel.id)).where(
             open_filter, TicketModel.sla_paused_at.is_(None), active_deadline >= now,
-            active_deadline <= now + timedelta(hours=4),
+            active_deadline <= now + timedelta(hours=get_settings().worker_due_soon_hours),
         )) or 0)
         overdue = int(self.db.scalar(select(func.count(TicketModel.id)).where(
             open_filter, TicketModel.sla_paused_at.is_(None), active_deadline < now,
         )) or 0)
-        avg_accept = float(self.db.scalar(select(func.avg(func.extract("epoch", TicketModel.accepted_at - TicketModel.created_at) / 60)).where(
+        avg_accept = self.db.scalar(select(func.avg(func.extract("epoch", TicketModel.accepted_at - TicketModel.created_at) / 60)).where(
             TicketModel.accepted_at.is_not(None)
-        )) or 0)
-        avg_resolve = float(self.db.scalar(select(func.avg(func.extract("epoch", TicketModel.resolved_at - TicketModel.accepted_at) / 60)).where(
+        ))
+        avg_resolve = self.db.scalar(select(func.avg(func.extract("epoch", TicketModel.resolved_at - TicketModel.accepted_at) / 60)).where(
             TicketModel.resolved_at.is_not(None), TicketModel.accepted_at.is_not(None)
-        )) or 0)
-        return soon, overdue, round(avg_accept, 1), round(avg_resolve, 1)
+        ))
+        return (
+            soon, overdue,
+            round(float(avg_accept), 1) if avg_accept is not None else None,
+            round(float(avg_resolve), 1) if avg_resolve is not None else None,
+        )
 
     def department_sla(self):
         completion = func.coalesce(TicketModel.resolved_at, TicketModel.closed_at, func.now())

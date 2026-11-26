@@ -8,6 +8,23 @@ export type WorkOrderStatus = 'pending'|'processing'|'returned'|'transferred'|'s
 export interface ApiSuccess<T> { success: true; data: T }
 export interface ApiErrorBody { code: string; message: string; details?: Array<{ loc?: (string | number)[]; msg?: string }> | Record<string, unknown> | null }
 export interface User { id: number; username: string; display_name: string; role: Role; department_id?: number | null; is_active: boolean }
+export interface AuthTokenResponse {
+  access_token: string
+  token_type: string
+  expires_in?: number
+  token_version?: number
+  user?: User
+}
+export interface CitizenRegisterPayload {
+  username: string
+  password: string
+  display_name?: string
+  phone?: string
+}
+export interface ChangePasswordPayload {
+  current_password: string
+  new_password: string
+}
 export interface UserPage { items: User[]; page: number; page_size: number; total: number }
 export interface UserFilters { page?:number; page_size?:number; keyword?:string; role?:Role; is_active?:boolean; department_id?:number; sort?:'username'|'display_name'|'role'|'created_at'; order?:'asc'|'desc' }
 export interface Department { id: number; code: string; name: string; description?: string | null; is_active: boolean }
@@ -40,7 +57,15 @@ export interface WorkOrder {
   accepted_at?:string|null; submitted_at?:string|null; completed_at?:string|null; version:number; created_at:string; updated_at:string;
   history:WorkOrderHistory[];
 }
-export interface TicketDetail extends Ticket { history: TicketHistory[]; feedbacks:TicketFeedback[]; work_orders:WorkOrder[] }
+export interface TicketResolutionDraft {
+  resolution_summary: string; resolution_measures: string; resolution_outcome: string;
+  public_reply: string; internal_note?: string | null;
+}
+export interface TicketDetail extends Ticket {
+  history: TicketHistory[]; feedbacks: TicketFeedback[]; work_orders: WorkOrder[];
+  review_draft?: TicketResolutionDraft | null;
+  aftercare_events?: { kind: 'follow_up'|'appeal_rejected'|'appeal_completed'; created_at: string; handling_round?: number | null }[];
+}
 export type AttachmentType = 'citizen_material'|'site_photo'|'official_document'|'processing_proof'|'other'
 export type AttachmentVisibility = 'public'|'internal'
 export interface TicketAttachment {
@@ -51,13 +76,11 @@ export interface TicketAttachment {
 }
 export interface AttachmentList { items:TicketAttachment[]; total:number }
 export interface TicketPage { items: Ticket[]; page: number; page_size: number; total: number }
-export interface TicketFilters { page?: number; page_size?: number; status?: TicketStatus; request_type?: string; department_id?: number; category_id?:number; priority?:Priority; sla_state?:'on_track'|'due_soon'|'overdue'|'paused'; keyword?: string; created_from?: string; created_to?: string; mine?: boolean; my_department?: boolean; sort?: 'created_at'|'updated_at'|'priority'; order?: 'asc'|'desc' }
-export interface Dashboard { metrics: {key:string;label:string;value:number;unit?:string|null}[]; status_distribution: ChartSlice[]; request_type_distribution: ChartSlice[]; department_distribution: ChartSlice[]; department_sla:{department_name:string;total:number;overdue:number;overdue_rate:number}[]; recent_tickets: Ticket[] }
+export interface TicketFilters { page?: number; page_size?: number; status?: TicketStatus; request_type?: string; department_id?: number; category_id?:number; priority?:Priority; sla_state?:'on_track'|'due_soon'|'overdue'|'paused'; work_queue?: 'awaiting_review'|'returned'; keyword?: string; created_from?: string; created_to?: string; mine?: boolean; my_department?: boolean; sort?: 'created_at'|'updated_at'|'priority'; order?: 'asc'|'desc' }
+export interface Dashboard { metrics: {key:string;label:string;value:number;unit?:string|null;has_samples?:boolean}[]; status_distribution: ChartSlice[]; request_type_distribution: ChartSlice[]; department_distribution: ChartSlice[]; department_sla:{department_name:string;total:number;overdue:number;overdue_rate:number}[]; recent_tickets: Ticket[]; intake_trend?: { day:string; count:number }[]; trend_timezone?:string }
 export interface ChartSlice { name: string; value: number }
 export interface AuditLog { id:number; actor_user_id?:number|null; actor_type:string; action:string; resource_type?:string|null; resource_id?:string|null; outcome:string; details?:string|null; request_id?:string|null; created_at:string }
 export interface AuditPage { items: AuditLog[]; page:number; page_size:number; total:number }
-export interface RasaMessage { recipient_id?: string; text?: string; buttons?: {title:string;payload:string}[]; custom?: Record<string, unknown>; image?: string }
-export interface DraftPayload { type:'draft_extracted'; draft:{request_type?:string;description?:string;location?:string;occurred_at_text?:string;target?:string;contact?:string}; missing:string[] }
 export type NotificationEvent='ticket_created'|'ticket_accepted'|'supplement_required'|'ticket_assigned'|'ticket_due_soon'|'processing_completed'|'awaiting_confirmation'|'ticket_closed'|'appeal_submitted'|'appeal_approved'|'appeal_rejected'|'appeal_completed'|'appeal_prompt'
 export interface NotificationItem { id:string;ticket_id?:string|null;event_type:NotificationEvent;channel:string;title:string;content:string;status:'unread'|'read';delivery_status:string;read_at?:string|null;created_at:string }
 export interface NotificationPage { items:NotificationItem[];page:number;page_size:number;total:number;unread_count:number }
@@ -167,6 +190,8 @@ export interface KbRagAnswer {
   no_evidence: boolean; retrieval_count: number
   latency_ms: number; generated_at: string
   provider?: string; model?: string
+  degraded?: boolean
+  degrade_reason?: string | null
 }
 export interface KbRetrievalChunk {
   chunk_id: number; content: string
@@ -230,19 +255,30 @@ export interface KbEvalCasePayload {
 export interface KbEvalRunResult {
   total: number
   metrics: {
-    retrieval_hit_rate: number
-    citation_correct_rate: number
-    answer_faithful_rate: number
-    expired_policy_blocked_rate: number
-    permission_isolated_rate: number
+    retrieval_hit_rate: number | null
+    citation_correct_rate: number | null
+    citation_precision: number | null
+    recall_at_k: number | null
+    mrr: number | null
+    ndcg_at_k: number | null
+    refusal_correct_rate: number | null
+    failed_cases: number
+    fact_coverage_rate: number | null
+    answer_faithful_rate: number | null
+    extractive_source_match_rate: number | null
+    extractive_source_match_scored: number
+    expired_policy_blocked_rate: number | null
+    permission_isolated_rate: number | null
     no_answer_rate: number
     avg_latency_ms: number
   }
   runs: Array<{
     case_id: number; title: string; scenario: string
-    retrieval_hit: boolean; citation_correct: boolean
-    answer_faithful: boolean; expired_policy_blocked: boolean
-    permission_isolated: boolean; no_evidence: boolean
+    retrieval_hit: boolean | null; citation_correct: boolean | null
+    answer_faithful: boolean | null; fact_coverage: boolean | null
+    extractive_source_match: boolean | null; expired_policy_blocked: boolean | null
+    permission_isolated: boolean | null; no_evidence: boolean
+    error?: string | null
     latency_ms: number
   }>
 }
@@ -262,6 +298,40 @@ export interface KbTicketAdvice {
   no_evidence: boolean
   generated_at: string
   provider?: string; model?: string
+  degraded?: boolean; degrade_reason?: string | null; latency_ms?: number
   /** Optional suggestion schema / content version from backend. */
   suggestion_version?: number | string | null
+}
+
+export interface TicketBatchAssignPayload {
+  ticket_ids: string[]
+  department_id: number
+  assigned_user_id?: number
+  note?: string
+  versions?: Record<string, number>
+}
+
+export interface TicketBatchAssignSucceeded {
+  ticket_id: string
+  status: string
+  version: number
+  work_order_no?: string | null
+}
+
+export interface TicketBatchAssignFailed {
+  ticket_id: string
+  code: string
+  message: string
+}
+
+export interface TicketBatchAssignResult {
+  succeeded: TicketBatchAssignSucceeded[]
+  failed: TicketBatchAssignFailed[]
+}
+
+export interface AuditExportParams {
+  action?: string
+  outcome?: string
+  q?: string
+  limit?: number
 }

@@ -1,9 +1,10 @@
-import { Alert, Button, Card, Collapse, Descriptions, Divider, Form, Input, Modal, Select, Space, Switch, Timeline, Typography, message } from 'antd'
-import { BellOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined, EditOutlined, SendOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Collapse, Descriptions, Divider, Form, Input, Modal, Select, Space, Switch, Typography, message } from 'antd'
+import { BellOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined, EditOutlined, PrinterOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { CitizenTicketJourney } from '../components/CitizenTicketJourney'
 import {
   acceptTicket, assignTicket, closeTicket, getTicket, pauseTicketSla, rejectTicket, remindTicket,
   requestTicketSupplement, resumeTicketSla, submitTicketFeedback, submitTicketSupplement, ticketAction, ticketKeys, updateContact,
@@ -17,6 +18,8 @@ import { TicketStatusTag } from '../components/TicketStatusTag'
 import { AttachmentPanel } from '../components/AttachmentPanel'
 import { WorkOrderPanel } from '../components/WorkOrderPanel'
 import { AiCaseAssistant } from '../components/AiCaseAssistant'
+import { TicketLifecycle } from '../components/TicketLifecycle'
+import { WorkspaceLoading } from '../components/WorkspaceState'
 import type { FeedbackRating, Priority } from '../types'
 import { closureTypeLabel } from '../utils/closureType'
 
@@ -39,7 +42,7 @@ const labels:Record<Action,string> = {
   request_supplement:'退回市民补充材料',submit_supplement:'提交补充材料',
 }
 const outcomeLabels:Record<string,string> = {resolved:'已解决',partially_resolved:'部分解决',unresolved:'暂未解决'}
-const ratingLabels:Record<string,string> = {satisfied:'满意',mostly_satisfied:'基本满意',dissatisfied:'不满意'}
+const ratingLabels:Record<FeedbackRating,string> = {satisfied:'满意',mostly_satisfied:'基本满意',dissatisfied:'不满意'}
 const reasonLabels:Record<string,string> = {
   out_of_scope:'不属于受理范围', out_of_jurisdiction:'不属于本辖区', duplicate:'重复诉求',
   insufficient_information:'信息不足', handled_elsewhere:'已通过其他渠道处理',
@@ -48,7 +51,7 @@ const reasonLabels:Record<string,string> = {
 
 export function allowedActions(role:string|undefined,status:string):Action[] {
   // Admin handles exceptions (close/force paths); normal resolve stays with agent/department flow.
-  if(role==='admin') return status==='pending'?['accept','reject','remind']:status==='accepted'?['assign','pause_sla','remind']:status==='assigned'?['process','pause_sla','remind']:status==='processing'?['pause_sla','remind']:status==='resolved'?['close','process']:[]
+  if(role==='admin') return status==='pending'?['accept','reject','remind']:status==='accepted'?['assign','pause_sla','remind']:status==='assigned'?['process','pause_sla','remind']:status==='processing'?['pause_sla','remind']:status==='resolved'?['close']:[]
   if(role==='agent') return status==='pending'?['accept','reject','contact','remind']:status==='accepted'?['assign','contact','remind']:[]
   // Department staff submit results via WorkOrderPanel; they do not self-resolve the parent ticket.
   if(role==='department_staff') return status==='assigned'?['process','pause_sla','remind']:status==='processing'?['note','pause_sla','remind']:[]
@@ -58,6 +61,7 @@ export function allowedActions(role:string|undefined,status:string):Action[] {
 
 export function TicketDetailPage(){
   const {ticketId=''}=useParams(); const {user}=useAuth(); const nav=useNavigate(); const qc=useQueryClient()
+  const location = useLocation()
   const [active,setActive]=useState<Action|null>(null); const [form]=Form.useForm<ActionFormValues>()
   const query=useQuery({queryKey:ticketKeys.detail(ticketId),queryFn:()=>getTicket(ticketId)})
   const departments=useQuery({queryKey:['departments'],queryFn:listDepartments,enabled:active==='assign'})
@@ -82,7 +86,7 @@ export function TicketDetailPage(){
     onSuccess:()=>{message.success('操作已完成，工单数据已刷新');setActive(null);form.resetFields();void qc.invalidateQueries({queryKey:ticketKeys.all});void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})},
     onError:e=>{if(e instanceof ApiError&&e.status===409){message.warning('数据已被他人更新，已为你加载最新工单');void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})}else message.error(e instanceof Error?e.message:'操作失败')},
   })
-  if(query.isLoading)return <Card loading/>
+  if(query.isLoading)return <WorkspaceLoading label="正在加载工单详情" />
   if(query.isError||!query.data)return <ErrorState error={query.error} retry={()=>query.refetch()}/>
   const t=query.data; let actions=allowedActions(user?.role,t.status);if(t.sla_paused_at)actions=actions.map(a=>a==='pause_sla'?'resume_sla':a)
   const isMultiDepartment=t.work_orders.length>1||t.work_orders.some(order=>order.task_type!=='primary')
@@ -90,12 +94,33 @@ export function TicketDetailPage(){
   if(['agent','admin'].includes(user?.role||'')&&['pending','accepted'].includes(t.status)&&t.collaboration_status!=='awaiting_citizen')actions.push('request_supplement')
   if(user?.role==='citizen'&&t.collaboration_status==='awaiting_citizen')actions=['submit_supplement',...actions.filter(a=>a!=='contact')]
   const openAction=(action:Action)=>{form.resetFields();if(action==='feedback')form.setFieldsValue({rating:'satisfied'});if(action==='reject')form.setFieldsValue({needs_supplement:false});if(action==='accept')form.setFieldsValue({priority:'normal'});if(action==='assign'){const category=categories.data?.find(c=>c.id===t.category_id);form.setFieldsValue({department_id:category?.default_department_id||undefined})}setActive(action)}
-  const actionLabel=(action:Action)=>action==='process'&&t.status==='resolved'?'退回重新办理':labels[action]
+  const ticketListPath = user?.role === 'department_staff' ? '/department/tickets' : `/${user?.role ?? 'citizen'}/tickets`
+  const listSearch = location.state?.ticketListSearch
+  const returnPath = typeof listSearch === 'string' && listSearch.startsWith('?') ? ticketListPath + listSearch : ticketListPath
   const latestHistory=[...t.history].sort((a,b)=>dayjs(b.created_at).valueOf()-dayjs(a.created_at).valueOf())[0]
   const slaMessage=({overdue:'已超时',due_soon:'即将超时',paused:'计时已暂停',on_track:'时限正常'} as Record<string,string>)[t.sla_state]
   const slaDetail=t.sla_paused_at?`暂停原因：${t.sla_pause_reason}`:t.remaining_seconds!=null?`${t.remaining_seconds<0?'超出':'剩余'} ${Math.floor(Math.abs(t.remaining_seconds)/3600)} 小时 ${Math.floor(Math.abs(t.remaining_seconds)%3600/60)} 分钟`:'暂无截止时间'
+  const slaStarts = t.status === 'pending' ? t.created_at : t.accepted_at
+  const slaEnds = t.status === 'pending' ? t.accept_due_at : t.resolve_due_at
+  const slaBudget = slaStarts && slaEnds && t.handling_round <= 1 ? (Date.parse(slaEnds) - Date.parse(slaStarts)) / 1000 : 0
+  const remaining = t.remaining_seconds
   return <>
-    <PageHeader eyebrow="TICKET DETAIL" title={t.ticket_id} description={`版本 ${t.version} · 最后更新 ${dayjs(t.updated_at).format('YYYY-MM-DD HH:mm')}`} extra={<Space><Button onClick={()=>nav(-1)}>返回列表</Button><TicketStatusTag status={t.status} label={t.status_label}/></Space>}/>
+    <header className="ticket-print-header" aria-hidden="true">
+      <div>
+        <div className="ticket-print-kicker">CIVICECHO · 政务诉求办理单</div>
+        <h2 className="ticket-print-title">倾听助手工单详情归档单</h2>
+      </div>
+      <div className="ticket-print-meta">
+        <span>工单编号：{t.ticket_id}</span>
+        <span>打印时间：{dayjs().format('YYYY-MM-DD HH:mm')}</span>
+      </div>
+    </header>
+    <PageHeader title={t.ticket_id} description={`${user?.role === 'citizen' ? '' : `版本 ${t.version} · `}最后更新 ${dayjs(t.updated_at).format('YYYY-MM-DD HH:mm')}`} extra={<Space wrap><Button className="print-hide" onClick={() => nav(returnPath)}>返回列表</Button>
+      {user?.role === 'department_staff' && <Button className="print-hide" href="#department-work-orders">查看协同任务</Button>}
+      {user?.role === 'department_staff' && ['assigned', 'processing'].includes(t.status) && t.assigned_department_id === user.department_id && <Link className="print-hide" to={`/department/intelligence?ticket=${encodeURIComponent(t.ticket_id)}`}>打开 AI 办件辅助</Link>}
+      <Button className="print-hide" icon={<PrinterOutlined />} onClick={() => window.print()}>打印工单</Button>
+      <TicketStatusTag status={t.status} label={t.status_label}/></Space>}/>
+    {user?.role === 'citizen' && <div className="print-hide"><CitizenTicketJourney status={t.status} /></div>}
     {t.collaboration_status==='awaiting_citizen'&&<Alert showIcon type="warning" message="工单正在等待市民补充材料" description={t.supplement_reason} style={{marginBottom:20}}/>}
 
     <Card className="surface detail-card handling-focus-card" style={{marginBottom:20}} title="办理焦点">
@@ -111,11 +136,11 @@ export function TicketDetailPage(){
           {key:'latest',label:'最新办理结果',span:{xs:1,sm:2,md:3},children:<div className="handling-focus-result">{t.resolution_summary||t.public_reply||latestHistory?.content||latestHistory?.remark||'暂无结果'}</div>},
         ]}
       />
-      {actions.length>0&&<>
+      {actions.length>0&&<div className="print-hide">
         <Divider style={{margin:'16px 0'}}/>
         <Typography.Text type="secondary" style={{display:'block',marginBottom:8}}>下一步可执行操作</Typography.Text>
-        <div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{actionLabel(a)}</Button>)}</div>
-      </>}
+        <div className="action-bar">{actions.map(a=><Button key={a} type={['accept','assign','process','close','feedback'].includes(a)?'primary':'default'} danger={a==='reject'} icon={a==='assign'?<SendOutlined/>:a==='contact'?<EditOutlined/>:a==='reject'?<CloseOutlined/>:a==='remind'?<BellOutlined/>:['pause_sla','resume_sla'].includes(a)?<ClockCircleOutlined/>:<CheckOutlined/>} onClick={()=>openAction(a)}>{labels[a]}</Button>)}</div>
+      </div>}
     </Card>
 
     <div className="detail-grid"><div>
@@ -138,21 +163,17 @@ export function TicketDetailPage(){
         {key:'detail',label:'详细说明',children:t.rejection_detail},{key:'channel',label:'建议办理渠道',children:t.suggested_channel||'未提供'},
         {key:'supplement',label:'需要补充材料',children:t.needs_supplement?'是':'否'},
       ]}/></Card>}
-      {t.feedbacks.length>0&&<Card title="市民反馈" className="surface detail-card" style={{marginTop:20}}><Timeline items={t.feedbacks.slice().reverse().map(f=>({color:f.result==='closed'?'green':'orange',children:<div><b>{ratingLabels[f.rating]} · {f.result==='closed'?'确认办结':'申请重办'}</b>{f.comment&&<div style={{marginTop:4}}>{f.comment}</div>}<div style={{color:'#647680',fontSize:13,marginTop:4}}>{dayjs(f.created_at).format('YYYY-MM-DD HH:mm:ss')}</div></div>}))}/></Card>}
-
-      <WorkOrderPanel ticket={t} user={user!} onChanged={()=>{void qc.invalidateQueries({queryKey:ticketKeys.all});void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})}} collapseCompleted/>
+      <Card title="办理时间线" className="surface detail-card ticket-lifecycle-card">
+        <TicketLifecycle ticket={t} showWorkOrders={user?.role !== 'citizen'} />
+      </Card>
+      <section id="department-work-orders" className="ticket-work-orders" aria-label="部门协同任务">
+        <WorkOrderPanel ticket={t} user={user!} onChanged={()=>{void qc.invalidateQueries({queryKey:ticketKeys.all});void qc.invalidateQueries({queryKey:ticketKeys.detail(ticketId)})}} collapseCompleted/>
+      </section>
 
       <Collapse
-        className="surface detail-card"
+        className="surface detail-card print-hide"
         style={{marginTop:20,background:'#fff'}}
         items={[
-          {
-            key:'history',
-            label:'完整状态历史',
-            children: t.history.length
-              ? <Timeline items={t.history.slice().reverse().map(h=>({color:h.current_status==='closed'?'green':'blue',children:<div><b>{h.content||h.remark||h.operation_type}</b><div style={{color:'#647680',fontSize:13,marginTop:4}}>{dayjs(h.created_at).format('YYYY-MM-DD HH:mm:ss')} · {h.previous_status?`${h.previous_status} → `:''}{h.current_status}</div></div>}))}/>
-              : <Alert type="info" message="暂无办理记录"/>,
-          },
           {
             key:'audit',
             label:'审计记录（办理轨迹）',
@@ -170,7 +191,10 @@ export function TicketDetailPage(){
           }] : []),
         ]}
       />
-    </div><aside><Card title="SLA 时限" className={`surface detail-card sla-card ${t.sla_state}`}><Alert showIcon type={t.sla_state==='overdue'?'error':t.sla_state==='due_soon'?'warning':t.sla_state==='paused'?'info':'success'} message={slaMessage} description={slaDetail}/><Descriptions style={{marginTop:16}} column={1} items={[
+    </div><aside><Card title="SLA 时限" className={`surface detail-card sla-card ${t.sla_state}`}><Alert showIcon type={t.sla_state==='overdue'?'error':t.sla_state==='due_soon'?'warning':t.sla_state==='paused'?'info':'success'} message={slaMessage} description={slaDetail}/>
+      {remaining != null && slaBudget > 0 && t.sla_state !== 'paused' && <progress
+        className="ticket-sla-progress" aria-label="当前阶段已用时限" max={slaBudget} value={Math.min(slaBudget, Math.max(0, slaBudget - remaining))} />}
+      <Descriptions style={{marginTop:16}} column={1} items={[
       {key:'accept_due',label:'应受理时间',children:t.accept_due_at?dayjs(t.accept_due_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'resolve_due',label:'应办结时间',children:t.resolve_due_at?dayjs(t.resolve_due_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'actual_accept',label:'实际受理时间',children:t.accepted_at?dayjs(t.accepted_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'actual_close',label:'实际办结时间',children:t.closed_at?dayjs(t.closed_at).format('YYYY-MM-DD HH:mm'):'—'},{key:'paused',label:'累计暂停',children:`${Math.floor(t.total_paused_seconds/60)} 分钟`},{key:'reminders',label:'催办次数',children:`${t.reminder_count} 次`},
     ]}/></Card><Card title="办理信息" className="surface detail-card" style={{marginTop:20}}><Descriptions column={1} items={[
       {key:'status',label:'当前状态',children:<TicketStatusTag status={t.status}/>},{key:'department',label:'责任部门',children:t.department_name||'待派发'},
@@ -180,7 +204,7 @@ export function TicketDetailPage(){
       {key:'closed',label:'办结方式',children:closureTypeLabel(t.closure_type)},
       {key:'round',label:'处理轮次',children:t.handling_round>1?`第 ${t.handling_round} 轮（重新办理）`:'第 1 轮'},
     ]}/></Card></aside></div>
-    <Modal title={active?actionLabel(active):''} open={!!active} onCancel={()=>setActive(null)} onOk={()=>form.submit()} confirmLoading={mutation.isPending} okText="确认提交" cancelText="取消" destroyOnHidden>
+    <Modal title={active?labels[active]:''} open={!!active} onCancel={()=>setActive(null)} onOk={()=>form.submit()} confirmLoading={mutation.isPending} okText="确认提交" cancelText="取消" destroyOnHidden>
       <Form form={form} layout="vertical" onFinish={v=>mutation.mutate(v)}>
         {active==='accept'&&<><Alert type="info" showIcon message="市民填写的紧急程度仅作参考；分类和最终优先级由坐席确认，并据此生成 SLA。" style={{marginBottom:16}}/><Form.Item name="category_id" label="末级诉求分类" rules={[{required:true,message:'请选择末级诉求分类'}]}><Select showSearch optionFilterProp="label" options={categories.data?.filter(c=>c.is_active&&!categories.data?.some(child=>child.parent_id===c.id&&child.is_active)).map(c=>({value:c.id,label:`${c.name} · ${c.code}`}))}/></Form.Item><Form.Item name="priority" label="确认优先级" rules={[{required:true}]}><Select options={[{value:'normal',label:'普通'},{value:'expedited',label:'加急'},{value:'urgent',label:'紧急'},{value:'major',label:'重大事件'}]}/></Form.Item></>}
         {active==='assign'&&<><Form.Item name="department_id" label="责任部门" rules={[{required:true,message:'请选择责任部门'}]}><Select options={departments.data?.filter(d=>d.is_active).map(d=>({value:d.id,label:d.name}))}/></Form.Item><Form.Item name="assigned_user_id" label="承办人（可选）"><Select allowClear options={users.data?.filter(u=>u.role==='department_staff'&&u.is_active).map(u=>({value:u.id,label:u.display_name}))}/></Form.Item></>}

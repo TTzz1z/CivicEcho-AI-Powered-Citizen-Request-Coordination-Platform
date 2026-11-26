@@ -2,8 +2,7 @@
  * Round 5: Playwright Smoke — 6 core E2E paths in Chromium only.
  *
  * Purpose: cover the critical demo flows in <5 minutes for daily verification.
- * The full 96-test multi-browser suite remains in the other spec files for
- * pre-release / pre-interview runs.
+ * The other spec files exercise the full browser release suite.
  *
  * Run:
  *   npx playwright test e2e/smoke.spec.ts --project=chromium
@@ -16,9 +15,10 @@
  *   S5. four roles route guards — unauthorized access redirected to /forbidden
  *   S6. AI case advice + three-state review recorded (advisory only, no status change)
  */
-import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test'
+import { request, type APIRequestContext, type Page } from '@playwright/test'
+import { test, expect } from './browser-check'
 
-const PASSWORD = process.env.E2E_PASSWORD || 'tingting-seed-demo-2026'
+import { e2ePassword as PASSWORD } from './env'
 const BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:8081'
 const API = process.env.E2E_API_URL || 'http://127.0.0.1:8001'
 

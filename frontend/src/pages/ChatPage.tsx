@@ -1,18 +1,16 @@
 import { Alert, Badge, Button, Card, Drawer, Grid, Input, Space, Spin, Tag, Typography, message } from 'antd'
-import { DeleteOutlined, FileTextOutlined, HomeOutlined, LoginOutlined, ReloadOutlined, SafetyCertificateOutlined, SendOutlined } from '@ant-design/icons'
+import { CommentOutlined, DeleteOutlined, FileTextOutlined, HistoryOutlined, HomeOutlined, LoginOutlined, ReloadOutlined, SafetyCertificateOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { sendOrchestrator, type OrchestratorResult } from '../api/orchestrator'
-import { sendRasaMessage } from '../api/rasa'
+import { streamOrchestratorChat, type OrchestratorResult, type OrchestratorStreamMeta } from '../api/orchestrator'
 import { useAuth } from '../auth/AuthContext'
-import { api } from '../api/client'
-import type { DraftPayload, KbCitation } from '../types'
+import { api, ApiError } from '../api/client'
+import type { KbCitation } from '../types'
 import { PageHeader } from '../components/PageHeader'
 import { PolicyCitations } from '../components/PolicyCitations'
 import { TicketDraftPanel, type DraftState } from '../components/TicketDraftPanel'
 import { ensureChineseReply } from '../utils/languageGuard'
 import {
-  clearChatPrivacyOnAccountSwitch,
   conversationDraftKey,
   conversationMessageKey,
   loadChatDraft,
@@ -38,14 +36,20 @@ const ticketPattern = /QT\d{16}/g
 function stableSender(userId?: number) { if (userId) return `web-user-${userId}`; let id = localStorage.getItem('tingting_sender_id'); if (!id) { id = `web-anon-${crypto.randomUUID()}`; localStorage.setItem('tingting_sender_id', id) } return id }
 
 export function ChatPage() {
-  const { user } = useAuth(); const location = useLocation(); const isPublicChat = location.pathname === '/chat'; const isCitizen = user?.role === 'citizen'; const sender = useMemo(() => stableSender(user?.id), [user?.id])
+  const { user } = useAuth()
+  const sender = useMemo(() => stableSender(user?.id), [user?.id])
+  return <ChatConversation key={sender} sender={sender} />
+}
+
+function ChatConversation({ sender }: { sender: string }) {
+  const { user } = useAuth(); const location = useLocation(); const isPublicChat = location.pathname === '/chat'; const isCitizen = user?.role === 'citizen'
   const screens = Grid.useBreakpoint()
   const [bindState, setBindState] = useState<BindState>('idle')
   const [boundCount, setBoundCount] = useState<number | null>(null)
   // Per-conversation id: rotate on "新建会话" so turn counters / guards / ai_usage_logs stay isolated.
   // Kept in sessionStorage so a refresh continues the same conversation.
   const [sessionId, setSessionId] = useState<string>(() => {
-    const key = `tingting_session_${stableSender(user?.id)}`
+    const key = `tingting_session_${sender}`
     const existing = sessionStorage.getItem(key)
     if (existing) return existing
     const id = crypto.randomUUID()
@@ -59,47 +63,38 @@ export function ChatPage() {
     return loadChatMessages<ChatItem>(conversationMessageKey(sender, sessionId))
   })
   const [input, setInput] = useState(''); const [sending, setSending] = useState(false); const [failed, setFailed] = useState<string | null>(null); const messagesViewport = useRef<HTMLDivElement>(null)
+  const [streamingMsg, setStreamingMsg] = useState<ChatItem | null>(null)
+  const activeRequest = useRef<AbortController | null>(null)
+  const activeSession = useRef(sessionId)
+  const streamingTextRef = useRef('')
+  const streamingMetaRef = useRef<OrchestratorStreamMeta | null>(null)
   const [draft, setDraft] = useState<DraftState | null>(() => loadChatDraft<DraftState>(conversationDraftKey(sender, sessionId)))
   const [draftMissing, setDraftMissing] = useState<string[]>([])
   const [dynamicFields, setDynamicFields] = useState<Record<string, unknown>[]>([])
   const [currentRoute, setCurrentRoute] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [conversations, setConversations] = useState<ChatConversationMeta[]>(() => {
     migrateLegacyChatIfNeeded(sender, sessionId)
     return loadConversationIndex(sender)
   })
 
-  const prevUserIdRef = useRef<number | undefined>(user?.id)
-  useEffect(() => {
-    const prev = prevUserIdRef.current
-    if (prev !== user?.id) {
-      clearChatPrivacyOnAccountSwitch(prev, user?.id)
-      prevUserIdRef.current = user?.id
-      setBindState('idle')
-      setBoundCount(null)
-      const key = `tingting_session_${sender}`
-      let id = sessionStorage.getItem(key)
-      if (!id) {
-        id = crypto.randomUUID()
-        sessionStorage.setItem(key, id)
-      }
-      migrateLegacyChatIfNeeded(sender, id)
-      setSessionId(id)
-      setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, id)))
-      setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, id)))
-      setConversations(loadConversationIndex(sender))
-      setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null)
-    }
-  }, [user?.id, sender])
+  useEffect(() => () => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+  }, [])
 
   useEffect(() => {
     saveChatMessages(storageKey, messages)
     if (messages.length) {
       setConversations(touchConversationFromMessages(sender, sessionId, messages))
     }
+  }, [messages, storageKey, sender, sessionId])
+
+  useEffect(() => {
     const viewport = messagesViewport.current
     viewport?.scrollTo?.({ top: viewport.scrollHeight, behavior: 'smooth' })
-  }, [messages, storageKey, sender, sessionId])
+  }, [messages, streamingMsg])
   useEffect(() => { if (draft) saveChatDraft(draftKey, draft); else localStorage.removeItem(draftKey) }, [draft, draftKey])
 
   const bindAnonymous = useCallback(async () => {
@@ -144,45 +139,120 @@ export function ChatPage() {
   useEffect(() => { void bindAnonymous() }, [bindAnonymous])
 
   const submit = async (raw = input, routeHint?: string) => {
-    const text = raw.trim(); if (!text || sending) return
-    setFailed(null); setInput(''); setMessages(m => [...m, { id: crypto.randomUUID(), side: 'user', text }]); setSending(true)
+    const text = raw.trim()
+    if (!text || activeRequest.current) return
+    const requestSessionId = sessionId
+    const request = new AbortController()
+    activeRequest.current = request
+    streamingTextRef.current = ''
+    streamingMetaRef.current = null
+    const streamingId = crypto.randomUUID()
+    const isCurrent = () => (
+      activeRequest.current === request
+      && activeSession.current === requestSessionId
+      && !request.signal.aborted
+    )
+    setFailed(null); setInput(''); setStreamingMsg(null); setMessages(m => [...m, { id: crypto.randomUUID(), side: 'user', text }]); setSending(true)
     try {
-      // Plan C: visitors and logged-in users both use Orchestrator (Chinese routing).
-      // Rasa remains as fallback when Orchestrator is unreachable.
-      try {
-        const result = await sendOrchestrator({ message: text, route_hint: routeHint, session_id: sessionId })
-        handleOrchestratorResult(result, text)
-      } catch {
-        // Fallback to language-guarded Rasa path. Never present Rasa localmode
-        // acknowledgements as successful ticket creation without a real QT id.
-        const bareTicketId = /^QT\d{12,16}$/i.exec(text)
-        const rasaText = bareTicketId ? `/query_request_status{"ticket_id":"${bareTicketId[0].toUpperCase()}"}` : text
-        const response = await sendRasaMessage(sender, rasaText)
-        const bot: ChatItem[] = []
-        for (const r of response) {
-          const custom = r.custom as DraftPayload | undefined
-          if (custom && custom.type === 'draft_extracted') {
-            setDraft(custom.draft); setDraftMissing(custom.missing || []); setCurrentRoute('ticket_intake')
-            if (!screens.md) setDrawerOpen(true)
-          }
-          if (r.text || r.buttons?.length) {
-            bot.push({
-              id: crypto.randomUUID(),
+      let receivedDone = false
+      const result = await streamOrchestratorChat(
+        { message: text, route_hint: routeHint, session_id: requestSessionId },
+        {
+          onMeta: meta => {
+            if (!isCurrent()) return
+            streamingMetaRef.current = meta
+            setCurrentRoute(meta.route)
+            setStreamingMsg({
+              id: streamingId,
               side: 'bot',
-              text: sanitizeRasaFallbackText(r.text || '请选择下一步操作'),
-              buttons: r.buttons,
-              degraded: true,
-              degradeReason: 'orchestrator_unavailable',
+              text: streamingTextRef.current,
+              route: meta.route,
+              payload: meta.payload,
+              requiresLlm: meta.requires_llm,
+              modelTier: meta.model_tier,
             })
-          }
-        }
-        setMessages(m => [...m, ...(bot.length ? bot : [{ id: crypto.randomUUID(), side: 'bot' as const, text: '智能助手暂时不可用，已切换降级通道。系统不会在此模式下自动创建工单。', degraded: true, degradeReason: 'orchestrator_unavailable' }])])
+          },
+          onDelta: chunk => {
+            if (!isCurrent()) return
+            streamingTextRef.current += chunk
+            const meta = streamingMetaRef.current
+            setStreamingMsg({
+              id: streamingId,
+              side: 'bot',
+              text: streamingTextRef.current,
+              route: meta?.route,
+              payload: meta?.payload,
+              requiresLlm: meta?.requires_llm,
+              modelTier: meta?.model_tier,
+            })
+          },
+          onDone: done => {
+            if (!isCurrent()) return
+            receivedDone = true
+            streamingTextRef.current = ''
+            streamingMetaRef.current = null
+            setStreamingMsg(null)
+            handleOrchestratorResult(done)
+          },
+        },
+        request.signal,
+      )
+      if (!receivedDone && isCurrent() && result) {
+        streamingTextRef.current = ''
+        streamingMetaRef.current = null
+        setStreamingMsg(null)
+        handleOrchestratorResult(result)
       }
-    } catch { setFailed(text); setMessages(m => [...m, { id: crypto.randomUUID(), side: 'bot', text: '服务暂时无法连接，请稍后重试。' }]) }
-    finally { setSending(false) }
+    } catch (error) {
+      if ((error instanceof DOMException && error.name === 'AbortError') || request.signal.aborted) {
+        return
+      }
+      if (isCurrent()) {
+        streamingTextRef.current = ''
+        streamingMetaRef.current = null
+        setStreamingMsg(null)
+        setFailed(text)
+        const isClientError = error instanceof ApiError && error.status >= 400 && error.status < 500
+        setMessages(m => [...m, {
+          id: crypto.randomUUID(),
+          side: 'bot',
+          text: isClientError ? error.message : '智能编排服务暂时不可用，请稍后点击重试，或前往工单页面手动提交诉求。',
+          ...(isClientError ? {} : { degraded: true, degradeReason: 'orchestrator_unavailable' }),
+        }])
+      }
+    } finally {
+      if (activeRequest.current === request) {
+        activeRequest.current = null
+        setSending(false)
+      }
+    }
   }
 
-  const handleOrchestratorResult = (result: OrchestratorResult, _originalText: string) => {
+  const stopGeneration = () => {
+    const request = activeRequest.current
+    if (!request) return
+    const partial = streamingTextRef.current.trim()
+    const meta = streamingMetaRef.current
+    activeRequest.current = null
+    request.abort()
+    streamingTextRef.current = ''
+    streamingMetaRef.current = null
+    setStreamingMsg(null)
+    setSending(false)
+    if (partial) {
+      setMessages(m => [...m, {
+        id: crypto.randomUUID(),
+        side: 'bot',
+        text: partial,
+        route: meta?.route,
+        payload: meta?.payload,
+        requiresLlm: meta?.requires_llm,
+        modelTier: meta?.model_tier,
+      }])
+    }
+  }
+
+  const handleOrchestratorResult = (result: OrchestratorResult) => {
     setCurrentRoute(result.route)
 
     // Handle ticket draft routes
@@ -224,26 +294,32 @@ export function ChatPage() {
     }
   }
 
-  const clear = () => {
-    // Start a fresh conversation; keep previous non-empty threads in the sidebar history.
-    const newId = crypto.randomUUID()
-    sessionStorage.setItem(`tingting_session_${sender}`, newId)
-    setSessionId(newId)
-    setMessages([]); setDraft(null); setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null)
+  const openConversation = (id: string) => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+    activeSession.current = id
+    streamingTextRef.current = ''
+    streamingMetaRef.current = null
+    setStreamingMsg(null)
+    sessionStorage.setItem(`tingting_session_${sender}`, id)
+    setSessionId(id)
+    setSending(false)
+    setInput('')
+    setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, id)))
+    setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, id)))
+    setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null); setDrawerOpen(false)
   }
 
+  const clear = () => openConversation(crypto.randomUUID())
+
   const switchConversation = (id: string) => {
-    if (id === sessionId || sending) return
+    if (id === sessionId) return
     if (messages.length) {
       saveChatMessages(storageKey, messages)
       setConversations(touchConversationFromMessages(sender, sessionId, messages))
     }
     if (draft) saveChatDraft(draftKey, draft)
-    sessionStorage.setItem(`tingting_session_${sender}`, id)
-    setSessionId(id)
-    setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, id)))
-    setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, id)))
-    setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null); setDrawerOpen(false)
+    openConversation(id)
   }
 
   const deleteConversation = (id: string, event: React.MouseEvent) => {
@@ -251,78 +327,90 @@ export function ChatPage() {
     const next = removeConversation(sender, id)
     setConversations(next)
     if (id !== sessionId) return
-    const fallback = next[0]
-    if (!fallback) {
-      clear()
-      return
-    }
-    sessionStorage.setItem(`tingting_session_${sender}`, fallback.id)
-    setSessionId(fallback.id)
-    setMessages(loadChatMessages<ChatItem>(conversationMessageKey(sender, fallback.id)))
-    setDraft(loadChatDraft<DraftState>(conversationDraftKey(sender, fallback.id)))
-    setDraftMissing([]); setDynamicFields([]); setCurrentRoute(null); setFailed(null); setDrawerOpen(false)
+    openConversation(next[0]?.id ?? crypto.randomUUID())
   }
 
   const handleSubmitted = (ticketId: string) => {
+    if (activeSession.current !== sessionId) return
     setMessages(m => [...m, { id: crypto.randomUUID(), side: 'bot', text: `工单已创建，编号：${ticketId}。您可以在"我的工单"中查看办理进度。`, route: 'ticket_created' }])
     setDraft(null); setDynamicFields([]); setCurrentRoute(null)
+    setDrawerOpen(false)
     localStorage.removeItem(draftKey)
   }
 
   const missingCount = draft ? draftMissing.filter(f => !draft[f as keyof DraftState]).length : 0
 
-  return <div className="chat-page"><PageHeader eyebrow="SMART SERVICE" title="智能对话" description="政策咨询、投诉建议、工单查询——统一入口，智能路由。" extra={isPublicChat?<Space wrap><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user&&<Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</Space>:undefined} /><div className={`chat-shell${draft && screens.md ? ' has-draft' : ''}`}>
-    <aside className="chat-aside"><Button block type="primary" onClick={clear}>新建会话</Button>
+  const conversationNavigation = <>
+    <Button block type="primary" onClick={() => { clear(); setHistoryOpen(false) }}>新建会话</Button>
       {conversations.length > 0 && (
         <div className="chat-history" aria-label="聊天记录">
           <Typography.Title level={5} style={{ marginTop: 20, marginBottom: 8 }}>聊天记录</Typography.Title>
           <div className="chat-history-list">
             {conversations.map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                className={`chat-history-item${item.id === sessionId ? ' active' : ''}`}
-                onClick={() => switchConversation(item.id)}
-              >
+              <div key={item.id} className={`chat-history-item${item.id === sessionId ? ' active' : ''}`}>
+                <button type="button" className="chat-history-select" aria-pressed={item.id === sessionId}
+                  onClick={() => { switchConversation(item.id); setHistoryOpen(false) }}>
                 <span className="chat-history-title">{item.title}</span>
                 {item.preview && item.preview !== item.title && (
                   <span className="chat-history-preview">{item.preview}</span>
                 )}
-                <span
+                </button>
+                <button type="button"
                   className="chat-history-delete"
-                  role="button"
-                  tabIndex={0}
                   aria-label={`删除会话 ${item.title}`}
                   onClick={(e) => deleteConversation(item.id, e)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); deleteConversation(item.id, e as unknown as React.MouseEvent) } }}
                 >
-                  <DeleteOutlined />
-                </span>
-              </button>
+                  <DeleteOutlined aria-hidden />
+                </button>
+              </div>
             ))}
           </div>
         </div>
       )}
-      <Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}
-      <BindStatusAlert isCitizen={!!isCitizen} hasUser={!!user} bindState={bindState} boundCount={boundCount} onRetry={() => { if (user?.id) sessionStorage.removeItem(`tingting_bound_${user.id}`); void bindAnonymous() }} />
-    </aside>
-    <section className="chat-main" aria-label="智能对话区"><div ref={messagesViewport} className="messages" aria-live="polite">{messages.length === 0 && <div style={{ margin: 'auto', textAlign: 'center', maxWidth: 480 }}><div className="brand-mark" style={{ margin: '0 auto 18px', color: '#167c72', borderColor: '#82bdb6' }}>倾</div><Typography.Title level={3}>你好，我是倾听助手</Typography.Title><Typography.Paragraph type="secondary">我可以帮您咨询政策、提交投诉建议、查询工单进度。请直接描述您的需求。</Typography.Paragraph><Space wrap style={{ justifyContent: 'center' }}>{suggestions.map(s => <Tag key={s.hint} style={{ cursor: 'pointer', padding: '7px 11px' }} onClick={() => submit(s.title, s.hint)}>{s.title}</Tag>)}</Space></div>}
+      <Typography.Title level={5} style={{ marginTop: 28 }}>快捷入口</Typography.Title><Space direction="vertical" style={{ width: '100%' }}>{suggestions.map(s => <Button key={s.hint} block style={{ textAlign: 'left' }} onClick={() => { setHistoryOpen(false); void submit(s.title, s.hint) }}>{s.title}</Button>)}</Space>{currentRoute && <Tag style={{ marginTop: 16 }} color="cyan">当前场景：{routeLabel(currentRoute)}</Tag>}
+  </>
+  return <div className="chat-page civic-chat">
+    <PageHeader title="智能对话" description="描述您遇到的问题。登记诉求前，您可以核对和编辑工单草稿。"
+      extra={<Space wrap>
+        {!screens.lg && <Button icon={<HistoryOutlined aria-hidden />} onClick={() => setHistoryOpen(true)}>会话与快捷入口</Button>}
+        {isPublicChat && <><Link to="/welcome"><Button icon={<HomeOutlined/>}>返回服务首页</Button></Link>{!user && <Link to="/login"><Button type="primary" icon={<LoginOutlined/>}>账号登录</Button></Link>}</>}
+      </Space>} />
+    <BindStatusAlert isCitizen={!!isCitizen} hasUser={!!user} bindState={bindState} boundCount={boundCount} onRetry={() => { if (user?.id) sessionStorage.removeItem(`tingting_bound_${user.id}`); void bindAnonymous() }} />
+    <div className={`chat-shell${draft && screens.xl ? ' has-draft' : ''}`}>
+    {screens.lg && <aside className="chat-aside" aria-label="会话导航">{conversationNavigation}</aside>}
+    <section className="chat-main" aria-label="智能对话区"><div ref={messagesViewport} className="messages" role="log" aria-label="对话记录" aria-live="polite">
+      {messages.length === 0 && <div className="citizen-chat-intro">
+        <span className="citizen-chat-symbol" aria-hidden="true"><CommentOutlined /></span>
+        <Typography.Title level={2}>您好，需要办理什么？</Typography.Title>
+        <Typography.Paragraph type="secondary">可以直接输入诉求，也可以从常用服务开始。</Typography.Paragraph>
+        <div className="citizen-chat-options">{suggestions.map(s => <Button key={s.hint} onClick={() => submit(s.title, s.hint)}>{s.title}</Button>)}</div>
+      </div>}
       {messages.map(m => <div className={`message-row ${m.side}`} key={m.id}><div className="bubble">
-        <RouteMessage item={m} />
+        <RouteMessage item={m} canReadDocument={Boolean(user)} />
         {m.buttons && <div className="message-actions">{m.buttons.map(b => <Button size="small" key={b.payload} onClick={() => submit(b.title)}>{b.title}</Button>)}</div>}
         {(m.text.match(ticketPattern) || []).map(id => <div className="ticket-highlight" key={id}><b>工单 {id}</b><div style={{ marginTop: 5 }}>{user ? <Link to={`/citizen/tickets/${id}`}>查看工单详情</Link> : <span>登录市民账号后可查看完整办理进度</span>}</div></div>)}
         {m.side === 'bot' && <MessageMetaTags item={m} />}
       </div></div>)}
-      {sending && <div className="message-row bot"><div className="bubble"><Spin size="small" /> 正在分析您的需求…</div></div>}</div>
+      {streamingMsg ? (
+        <div className="message-row bot" data-testid="streaming-message">
+          <div className="bubble">
+            <RouteMessage item={streamingMsg} canReadDocument={Boolean(user)} />
+            <span className="ce-streaming-cursor" aria-hidden="true" />
+          </div>
+        </div>
+      ) : (
+        sending && <div className="message-row bot"><div className="bubble"><Spin size="small" /> 正在分析您的需求…</div></div>
+      )}</div>
       {failed && <Alert type="warning" showIcon closable message="消息发送失败" action={<Button size="small" icon={<ReloadOutlined />} onClick={() => submit(failed)}>重试</Button>} />}
-      <div className="composer"><Input.TextArea aria-label="输入消息" autoSize={{ minRows: 1, maxRows: 4 }} value={input} onChange={e => setInput(e.target.value)} placeholder="描述您的问题，如：博士家人有哪些福利待遇 / 小区路灯坏了三天…" onPressEnter={e => { if (!e.shiftKey) { e.preventDefault(); void submit() } }} /><Button aria-label="发送" type="primary" size="large" icon={<SendOutlined />} loading={sending} disabled={!input.trim()} onClick={() => submit()}>发送</Button><Button aria-label="清空" icon={<DeleteOutlined />} onClick={clear} /></div>
+      <div className="composer"><Input.TextArea aria-label="输入消息" autoSize={{ minRows: 1, maxRows: 4 }} value={input} onChange={e => setInput(e.target.value)} placeholder="输入您的问题或诉求…" onPressEnter={e => { if (!e.shiftKey && !e.nativeEvent.isComposing && !sending) { e.preventDefault(); void submit() } }} />{sending ? <Button danger icon={<StopOutlined aria-hidden />} onClick={stopGeneration}>停止生成</Button> : <Button aria-label="发送" type="primary" icon={<SendOutlined aria-hidden />} disabled={!input.trim()} onClick={() => submit()}>发送</Button>}<Button aria-label="清空" icon={<DeleteOutlined />} onClick={clear} /></div>
     </section>
-    {draft && screens.md && <aside className="chat-draft-aside" aria-label="工单草稿"><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={handleSubmitted} /></aside>}
+    {draft && screens.xl && <aside className="chat-draft-aside" aria-label="工单草稿"><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={handleSubmitted} /></aside>}
   </div>
-  {draft && !screens.md && <>
-    <Button className="draft-fab" type="primary" shape="circle" size="large" icon={<Badge count={missingCount} offset={[-4, 4]}><FileTextOutlined /></Badge>} onClick={() => setDrawerOpen(true)} />
-    <Drawer title="工单草稿" placement="bottom" height="75vh" open={drawerOpen} onClose={() => setDrawerOpen(false)}><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={(id) => { handleSubmitted(id); setDrawerOpen(false) }} /></Drawer>
+  {draft && !screens.xl && <>
+    <Button className="citizen-draft-trigger" type="primary" icon={<Badge count={missingCount} offset={[-4, 4]}><FileTextOutlined aria-hidden /></Badge>} onClick={() => setDrawerOpen(true)}>核对工单草稿</Button>
+    <Drawer title="核对并确认诉求" placement="bottom" size="80dvh" open={drawerOpen} onClose={() => setDrawerOpen(false)}><TicketDraftPanel draft={draft} missing={draftMissing} onChange={setDraft} onSubmitted={handleSubmitted} /></Drawer>
   </>}
+  {!screens.lg && <Drawer title="会话与快捷入口" placement="left" size={280} open={historyOpen} onClose={() => setHistoryOpen(false)}>{conversationNavigation}</Drawer>}
   </div>
 }
 
@@ -395,7 +483,7 @@ export function BindStatusAlert({
         showIcon
         data-testid="bind-success"
         message="已绑定市民账号"
-        description={boundCount && boundCount > 0 ? `已关联 ${boundCount} 条匿名会话工单；后续工单将进入“我的工单”。匿名绑定依赖本机会话标识，非跨设备账号找回。` : '工单将进入“我的工单”。匿名绑定依赖本机会话标识，非跨设备账号找回。'}
+        description={boundCount && boundCount > 0 ? `已关联 ${boundCount} 条匿名会话工单；后续工单将进入“我的工单”。匿名工单仅可在原设备关联。` : '提交后，可在“我的工单”查看进度。匿名工单仅可在原设备关联。'}
       />
     )
   }
@@ -414,20 +502,6 @@ export function BindStatusAlert({
 function routeLabel(route: string): string {
   const map: Record<string, string> = { policy_rag: '政策咨询', service_guide: '办事指南', ticket_intake: '投诉/报修', suggestion_intake: '意见建议', ticket_progress: '工单查询', department_navigation: '部门导航', emergency_route: '紧急事项', general_chat: '日常对话', human_handoff: '人工服务', clarify: '信息确认' }
   return map[route] || route
-}
-
-/** Rewrite legacy Rasa localmode copy that falsely implies a ticket was created. */
-export function sanitizeRasaFallbackText(text: string): string {
-  const guarded = ensureChineseReply(text)
-  const hasRealTicketId = /QT\d{12,16}/i.test(guarded)
-  const claimsSuccess = /已收到您的诉求|工单已创建|请前往[“"]?我的工单|后续办理进度/.test(guarded)
-  if (claimsSuccess && !hasRealTicketId) {
-    return (
-      '智能助手暂时不可用，已切换降级通道。系统没有创建真实工单，'
-      + '“我的工单”中不会出现新记录。请稍后重试，或登录后在工单页面手动提交诉求。'
-    )
-  }
-  return guarded
 }
 
 const DEGRADE_LABELS: Record<string, string> = {
@@ -450,7 +524,7 @@ function asCitations(payload?: Record<string, unknown>): KbCitation[] {
 }
 
 /** Route-specific message rendering */
-export function RouteMessage({ item }: { item: ChatItem }) {
+export function RouteMessage({ item, canReadDocument = false }: { item: ChatItem; canReadDocument?: boolean }) {
   const { route, payload, text } = item
 
   // Emergency: show alert style
@@ -464,13 +538,13 @@ export function RouteMessage({ item }: { item: ChatItem }) {
     const noEvidence = payload?.no_evidence === true
     const citations = asCitations(payload)
     return (
-      <Card size="small" style={{ background: '#f8fffe', border: '1px solid #d9f0ec' }} data-testid="policy-answer-card">
+      <Card size="small" className="ce-ai-shimmer" style={{ background: '#ffffff', border: '1px solid var(--ce-line)' }} data-testid="policy-answer-card">
         {banner && <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={banner} />}
         {noEvidence && (
           <Alert type="info" showIcon style={{ marginBottom: 10 }} data-testid="no-evidence-banner" message="未找到可引用政策依据，以下为引导说明，不是政策原文。" />
         )}
         <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{text}</Typography.Paragraph>
-        <PolicyCitations citations={citations} noEvidence={noEvidence} compact />
+        <PolicyCitations citations={citations} noEvidence={noEvidence} compact canReadDocument={canReadDocument} />
         <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>以上为 AI 参考解答，具体以官方政策为准。如需进一步处理，可说明"我要投诉"转为工单。</Typography.Text>
       </Card>
     )

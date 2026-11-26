@@ -1,6 +1,6 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './browser-check'
 
-const PASSWORD = process.env.E2E_PASSWORD || 'tingting-seed-demo-2026'
+import { e2ePassword as PASSWORD } from './env'
 
 async function loginAsCitizen(page: import('@playwright/test').Page) {
   await page.goto('/login')
@@ -10,21 +10,19 @@ async function loginAsCitizen(page: import('@playwright/test').Page) {
   await page.waitForURL('**/citizen/**', { timeout: 15000 })
 }
 
-// P0-E2E: wait for /orchestrator/chat API response instead of a fixed sleep,
-// then assert structured results. Records actual API latency for diagnostics.
+// Measure time to the stream headers, then wait for the structured result.
 async function sendChat(page: import('@playwright/test').Page, text: string): Promise<number> {
   const input = page.getByLabel('输入消息')
   await input.fill(text)
   const responsePromise = page.waitForResponse(
-    r => r.url().includes('/api/v1/orchestrator/chat') && r.status() === 200,
+    r => r.url().endsWith('/api/v1/orchestrator/chat/stream') && r.status() === 200,
     { timeout: 30_000 }
   )
   const start = Date.now()
   await page.getByRole('button', { name: /^发送$/ }).click()
   const response = await responsePromise
   const elapsed = Date.now() - start
-  // Drain the response so the runtime is happy; ignore body parsing errors.
-  try { await response.json() } catch { /* non-JSON or already drained */ }
+  expect(await response.text()).toContain('event: done')
   return elapsed
 }
 

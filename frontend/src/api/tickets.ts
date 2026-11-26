@@ -1,7 +1,18 @@
-import { api } from './client'
-import type { ApiSuccess, FeedbackRating, Priority, Ticket, TicketDetail, TicketFilters, TicketPage, WorkOrder, WorkOrderType } from '../types'
+import { api, extractDispositionFilename, triggerBlobDownload } from './client'
+import type { ApiSuccess, FeedbackRating, Priority, Ticket, TicketBatchAssignPayload, TicketBatchAssignResult, TicketDetail, TicketFilters, TicketPage, WorkOrder, WorkOrderType } from '../types'
 export const ticketKeys={all:['tickets'] as const,list:(f:TicketFilters)=>['tickets','list',f] as const,detail:(id:string)=>['tickets','detail',id] as const}
 export async function listTickets(filters:TicketFilters){ return (await api.get<ApiSuccess<TicketPage>>('/tickets',{params:filters})).data.data }
+export async function batchAssignTickets(payload:TicketBatchAssignPayload){ return (await api.post<ApiSuccess<TicketBatchAssignResult>>('/tickets/batch-assign',payload)).data.data }
+export async function exportTicketsCsv(filters:TicketFilters & {limit?:number}={}){
+  const params:Record<string,unknown>={}
+  for(const [k,v] of Object.entries(filters)){
+    if(k==='page'||k==='page_size')continue
+    if(v===undefined||v===''||v===false)continue
+    params[k]=v
+  }
+  const response=await api.get<Blob>('/tickets/export',{params,responseType:'blob',timeout:60_000})
+  triggerBlobDownload(response.data,extractDispositionFilename(response.headers['content-disposition'],'tickets-export.csv'))
+}
 export async function getTicket(id:string){ return (await api.get<ApiSuccess<TicketDetail>>(`/tickets/${id}`)).data.data }
 export async function createTicket(payload:{idempotency_key:string;request_type:string;description:string;location:string;occurred_at_text?:string;target?:string;contact?:string;source:string}){return (await api.post<ApiSuccess<{ticket:Ticket;idempotent_replay:boolean}>>('/tickets',payload)).data.data}
 export async function ticketAction(id:string,action:'accept'|'process'|'note',version:number,remark:string){ return (await api.post<ApiSuccess<Ticket>>(`/tickets/${id}/${action}`,{version,remark})).data.data }

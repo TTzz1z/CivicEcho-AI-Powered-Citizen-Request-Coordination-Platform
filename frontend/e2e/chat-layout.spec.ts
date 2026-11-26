@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './browser-check'
 
 test('长对话只滚动消息区并固定左侧建议栏', async ({ page }) => {
   await page.addInitScript(() => {
@@ -60,5 +60,5 @@ test('公开会话说明访客工单归属并可返回首页', async ({ page }) 
 
   await page.getByRole('link', { name: /返回服务首页/ }).click()
   await expect(page).toHaveURL(/\/welcome$/)
-  await expect(page.getByRole('button', { name: /访客智能对话/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: '访客智能对话' }).first()).toHaveAttribute('href', '/chat')
 })

@@ -34,12 +34,18 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def create_access_token(user_id: int, role: str, expires_delta: timedelta | None = None) -> str:
+def create_access_token(
+    user_id: int,
+    role: str,
+    expires_delta: timedelta | None = None,
+    token_version: int = 1,
+) -> str:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "role": role,
+        "ver": int(token_version or 1),
         "iss": "tingting-backend",
         "aud": "tingting-web",
         "jti": str(uuid.uuid4()),
@@ -69,6 +75,8 @@ def decode_access_token(token: str) -> dict[str, Any]:
             raise AuthenticationError("登录凭据已过期，请重新登录")
         int(payload["sub"])
         int(payload["iat"])
+        if "ver" in payload and int(payload["ver"]) < 1:
+            raise ValueError
         if not payload.get("jti"):
             raise ValueError
         return payload

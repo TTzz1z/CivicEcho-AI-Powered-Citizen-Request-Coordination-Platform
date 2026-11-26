@@ -1,8 +1,29 @@
-from datetime import datetime
+from datetime import date, datetime
+import re
 from typing import Generic, Literal, Optional, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .config import get_settings
+
+
+def validate_password_strength(value: str) -> str:
+    env = get_settings().app_env.strip().lower()
+    is_prod = env in {"production", "prod"}
+    min_length = 12 if is_prod else 8
+    if len(value) < min_length or len(value) > 256:
+        raise ValueError(f"密码长度至少需要 {min_length} 位，且不超过 256 位")
+    has_upper = bool(re.search(r"[A-Z]", value))
+    has_lower = bool(re.search(r"[a-z]", value))
+    has_letter = has_upper or has_lower
+    has_digit = bool(re.search(r"[0-9]", value))
+    has_special = bool(re.search(r"[^A-Za-z0-9\s]", value))
+    if not (has_letter and has_digit):
+        raise ValueError("密码必须同时包含至少 1 个英文字母和 1 个数字")
+    if is_prod and sum((has_upper, has_lower, has_digit, has_special)) < 3:
+        raise ValueError("生产环境密码至少需包含大写字母、小写字母、数字、特殊字符中的 3 类")
+    return value
 
 
 T = TypeVar("T")
@@ -38,7 +59,7 @@ class TicketCreate(BaseModel):
     timezone: str = Field(default="Asia/Shanghai", max_length=64)
     target: Optional[str] = Field(default=None, max_length=500)
     contact: Optional[str] = Field(default=None, max_length=200)
-    source: str = Field(default="rasa", min_length=1, max_length=32)
+    source: str = Field(default="web", min_length=1, max_length=32)
     # `priority` remains accepted for old clients, but is only a citizen/requester hint.
     priority: str = "normal"
     requested_priority: Optional[str] = None
@@ -118,6 +139,44 @@ class TicketAssign(TicketAction):
     assigned_user_id: Optional[int] = Field(default=None, gt=0)
 
 
+class TicketBatchAssign(BaseModel):
+    ticket_ids: list[str] = Field(min_length=1, max_length=50)
+    department_id: int = Field(gt=0)
+    assigned_user_id: Optional[int] = Field(default=None, gt=0)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    versions: Optional[dict[str, int]] = None
+
+    @field_validator("versions")
+    @classmethod
+    def validate_versions(cls, value: Optional[dict[str, int]]) -> Optional[dict[str, int]]:
+        if value is None:
+            return None
+        normalized: dict[str, int] = {}
+        for key, version in value.items():
+            if version < 1:
+                raise ValueError("versions 中的版本号必须大于等于 1")
+            normalized[str(key).strip().upper()] = int(version)
+        return normalized
+
+
+class TicketBatchAssignSucceeded(BaseModel):
+    ticket_id: str
+    status: str
+    version: int
+    work_order_no: Optional[str] = None
+
+
+class TicketBatchAssignFailed(BaseModel):
+    ticket_id: str
+    code: str
+    message: str
+
+
+class TicketBatchAssignResult(BaseModel):
+    succeeded: list[TicketBatchAssignSucceeded]
+    failed: list[TicketBatchAssignFailed]
+
+
 class TicketSupplementRequest(TicketAction):
     supplement_reason: str = Field(min_length=2, max_length=2000)
 
@@ -176,7 +235,7 @@ class TicketContactUpdate(TicketAction):
     contact: Optional[str] = Field(default=None, max_length=200)
 
 
-class TicketResolve(TicketAction):
+class TicketResolutionDraft(BaseModel):
     resolution_summary: str = Field(min_length=2, max_length=500)
     resolution_measures: str = Field(min_length=2, max_length=5000)
     resolution_outcome: str = Field(max_length=32)
@@ -189,6 +248,10 @@ class TicketResolve(TicketAction):
         if value not in RESOLUTION_OUTCOMES:
             raise ValueError("resolution_outcome 必须是 resolved、partially_resolved 或 unresolved")
         return value
+
+
+class TicketResolve(TicketAction, TicketResolutionDraft):
+    pass
 
 
 class TicketReject(TicketAction):
@@ -403,10 +466,26 @@ class WorkOrderRead(BaseModel):
     history: list[WorkOrderHistoryRead] = Field(default_factory=list)
 
 
+class TicketLifecycleEvent(BaseModel):
+    kind: Literal["follow_up", "appeal_rejected", "appeal_completed"]
+    created_at: datetime
+    handling_round: Optional[int] = None
+
+
 class TicketDetail(TicketRead):
+    review_draft: Optional[TicketResolutionDraft] = None
+    aftercare_events: list[TicketLifecycleEvent] = Field(default_factory=list)
     history: list[TicketStatusHistoryRead] = Field(default_factory=list)
     feedbacks: list[TicketFeedbackRead] = Field(default_factory=list)
     work_orders: list[WorkOrderRead] = Field(default_factory=list)
+
+
+class TicketServiceStatus(BaseModel):
+    ticket_id: str
+    request_type: str
+    status: str
+    status_label: str
+    created_at: datetime
 
 
 class AttachmentRead(BaseModel):
@@ -543,15 +622,14 @@ class AppealList(BaseModel):
     total: int
 
 
-class TicketQuery(BaseModel):
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=20, ge=1, le=100)
+class TicketFilterQuery(BaseModel):
     status: Optional[str] = None
     request_type: Optional[str] = None
     department_id: Optional[int] = Field(default=None, gt=0)
     category_id: Optional[int] = Field(default=None, gt=0)
     priority: Optional[str] = None
     sla_state: Optional[Literal["on_track", "due_soon", "overdue", "paused"]] = None
+    work_queue: Optional[Literal["awaiting_review", "returned"]] = None
     created_from: Optional[datetime] = None
     created_to: Optional[datetime] = None
     keyword: Optional[str] = Field(default=None, max_length=100)
@@ -591,9 +669,63 @@ class TicketQuery(BaseModel):
         return self
 
 
+class TicketQuery(TicketFilterQuery):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+
+class TicketExportQuery(TicketFilterQuery):
+    limit: int = Field(default=5000, ge=1, le=5000)
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+    @model_validator(mode="after")
+    def validate_not_same(self):
+        if self.new_password == self.current_password:
+            raise ValueError("新密码不能与当前密码相同")
+        return self
+
+
+class RegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=256)
+    display_name: Optional[str] = Field(default=None, max_length=100)
+    phone: Optional[str] = Field(default=None, max_length=32)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_username(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+    @model_validator(mode="after")
+    def normalize_display_name(self):
+        cleaned = (self.display_name or "").strip()
+        self.display_name = cleaned or self.username
+        if isinstance(self.phone, str):
+            self.phone = self.phone.strip() or None
+        return self
 
 
 class AiAnalyzeRequest(BaseModel):
@@ -714,6 +846,15 @@ class UserRead(BaseModel):
     is_active: bool
 
 
+class ChangePasswordResponse(TokenResponse):
+    token_version: int
+    user: UserRead
+
+
+class RegisterResponse(TokenResponse):
+    user: UserRead
+
+
 class UserList(BaseModel):
     items: list[UserRead]
     page: int
@@ -810,6 +951,7 @@ class DashboardMetric(BaseModel):
     label: str
     value: float
     unit: Optional[str] = None
+    has_samples: bool = True
 
 
 class DashboardSlice(BaseModel):
@@ -824,6 +966,11 @@ class DepartmentSlaStat(BaseModel):
     overdue_rate: float
 
 
+class DashboardTrendPoint(BaseModel):
+    day: date
+    count: int
+
+
 class DashboardData(BaseModel):
     metrics: list[DashboardMetric]
     status_distribution: list[DashboardSlice]
@@ -831,6 +978,8 @@ class DashboardData(BaseModel):
     department_distribution: list[DashboardSlice]
     department_sla: list[DepartmentSlaStat] = Field(default_factory=list)
     recent_tickets: list[TicketRead]
+    intake_trend: list[DashboardTrendPoint] = Field(default_factory=list)
+    trend_timezone: str = "Asia/Shanghai"
 
 
 class AuditLogRead(BaseModel):

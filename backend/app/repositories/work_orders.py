@@ -11,7 +11,17 @@ class WorkOrderRepository:
     def ticket(self, ticket_id: str, *, for_update: bool = False):
         statement = select(TicketModel).where(TicketModel.ticket_id == ticket_id.upper())
         if for_update:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return self.db.scalar(statement)
+
+    def lock_ticket_for_order(self, work_order_id: str, ticket_id: str | None = None) -> TicketModel | None:
+        statement = (select(TicketModel)
+            .join(WorkOrderModel, WorkOrderModel.ticket_id == TicketModel.ticket_id)
+            .where(WorkOrderModel.id == work_order_id)
+            .with_for_update(of=TicketModel)
+            .execution_options(populate_existing=True))
+        if ticket_id is not None:
+            statement = statement.where(TicketModel.ticket_id == ticket_id.upper())
         return self.db.scalar(statement)
 
     def get(self, work_order_id: str, *, for_update: bool = False):
@@ -23,6 +33,7 @@ class WorkOrderRepository:
                 selectinload(WorkOrderModel.history),
             )
             .where(WorkOrderModel.id == work_order_id)
+            .execution_options(populate_existing=True)
         )
         if for_update:
             statement = statement.with_for_update()

@@ -1,8 +1,10 @@
 from functools import lru_cache
 import os
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 class Settings(BaseSettings):
@@ -32,14 +34,27 @@ class Settings(BaseSettings):
     object_storage_bucket: str = "tingting-attachments"
     object_storage_secure: bool = False
     object_storage_region: str | None = None
+    object_storage_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    object_storage_readiness_required: bool = False
     malware_scan_mode: str = "disabled"
     malware_scan_url: str | None = None
     malware_scan_token: str | None = None
     malware_scan_timeout_seconds: int = 30
     malware_scan_require_clean: bool = False
     database_connect_timeout_seconds: int = 5
-    login_rate_limit_attempts: int = 5
-    login_rate_limit_window_seconds: int = 60
+    allow_citizen_self_register: bool = True
+    login_rate_limit_attempts: int = Field(default=5, ge=1)
+    login_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    register_rate_limit_attempts: int = Field(default=10, ge=1)
+    register_rate_limit_window_seconds: int = Field(default=300, ge=1)
+    anon_ticket_rate_limit_attempts: int = Field(default=15, ge=1)
+    anon_ticket_rate_limit_window_seconds: int = Field(default=300, ge=1)
+    upload_rate_limit_attempts: int = Field(default=30, ge=1)
+    upload_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    ai_rate_limit_attempts: int = Field(default=30, ge=1)
+    ai_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    export_rate_limit_attempts: int = Field(default=10, ge=1)
+    export_rate_limit_window_seconds: int = Field(default=60, ge=1)
     log_level: str = "INFO"
     ai_provider: str = "rules"
     ai_model_name: str = "phase6-rules-v1"
@@ -48,6 +63,7 @@ class Settings(BaseSettings):
     ai_model: str = "deepseek-chat"
     ai_timeout_seconds: int = 30
     ai_max_tokens: int = 1024
+    anonymous_retention_days: int = Field(default=30, ge=1, le=365)
     # --- Knowledge Base / RAG ---
     embedding_api_key: str | None = None
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
@@ -57,6 +73,8 @@ class Settings(BaseSettings):
     kb_chunk_size: int = 500
     kb_chunk_overlap: int = 100
     kb_rag_top_k: int = 5
+    kb_rag_min_lexical_coverage: float = Field(default=0.22, ge=0, le=1)
+    kb_rag_min_vector_similarity: float = Field(default=0.62, ge=0, le=1)
     kb_upload_bucket: str = "tingting-kb"
     kb_allow_direct_publish: bool = True
     oidc_enabled: bool = False
@@ -84,7 +102,10 @@ class Settings(BaseSettings):
     worker_enabled: bool = True
     worker_scan_interval_seconds: int = 60
     worker_due_soon_hours: int = 4
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    worker_outbox_retention_days: int = Field(default=90, ge=1)
+    worker_ai_retention_days: int = Field(default=180, ge=1)
+    worker_orphan_grace_days: int = Field(default=7, ge=1)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -112,9 +133,9 @@ class Settings(BaseSettings):
             raise ValueError("WORK_ORDER_PLATFORM must be disabled, servicenow or government")
         if self.oidc_enabled and not all((self.oidc_issuer, self.oidc_client_id, self.oidc_client_secret, self.oidc_redirect_uri)):
             raise ValueError("OIDC issuer, client credentials and redirect URI are required when OIDC is enabled")
-        if self.app_env.lower() not in {"production", "prod"}:
+        if self.app_env.strip().lower() not in {"production", "prod"}:
             return self
-        weak_markers = {"change-me", "development", "example", "default", "password", "minioadmin"}
+        weak_markers = {"change-me", "development", "example", "default", "password", "minioadmin", "<生成"}
         for name, value, minimum in (
             ("JWT_SECRET", self.jwt_secret, 32),
             ("SERVICE_API_TOKEN", self.service_api_token, 32),
@@ -122,7 +143,11 @@ class Settings(BaseSettings):
             lowered = value.lower()
             if len(value) < minimum or any(marker in lowered for marker in weak_markers):
                 raise ValueError(f"{name} is weak or still uses a placeholder")
-        if any(marker in self.database_url.lower() for marker in weak_markers):
+        try:
+            database_password = make_url(self.database_url).password or ""
+        except (ArgumentError, ValueError):
+            raise ValueError("DATABASE_URL is invalid") from None
+        if len(database_password) < 16 or any(marker in database_password.lower() for marker in weak_markers):
             raise ValueError("DATABASE_URL contains a weak/default password")
         if not self.allowed_origins or "*" in self.allowed_origins:
             raise ValueError("CORS_ORIGINS must be an explicit production allowlist")
@@ -139,8 +164,8 @@ class Settings(BaseSettings):
         # may use HTTP (OBJECT_STORAGE_SECURE=false); external HTTPS is terminated at Caddy.
         if not (self.object_storage_endpoint or "").strip():
             raise ValueError("OBJECT_STORAGE_ENDPOINT is required in production")
-        if not (self.object_storage_access_key or "").strip() or not (self.object_storage_secret_key or "").strip():
-            raise ValueError("object storage credentials are required in production")
+        if len(self.object_storage_access_key.strip()) < 8 or len(self.object_storage_secret_key.strip()) < 16:
+            raise ValueError("production requires object storage access keys of at least 8 characters and secrets of at least 16")
         if not (self.object_storage_bucket or "").strip() or not (self.kb_upload_bucket or "").strip():
             raise ValueError("OBJECT_STORAGE_BUCKET and KB_UPLOAD_BUCKET are required in production")
         storage_values = f"{self.object_storage_access_key} {self.object_storage_secret_key}".lower()
@@ -153,9 +178,10 @@ class Settings(BaseSettings):
         seed_password = (os.environ.get("SEED_PASSWORD") or os.environ.get("LOCAL_SEED_PASSWORD") or "").strip()
         if seed_password:
             forbidden_seed = {
-                "password", "123456789012", "change-me", "admin123456", "tingting-seed-demo-2026",
+                "password", "123456789012", "change-me", "admin123456",
             }
-            if len(seed_password) < 12 or seed_password.lower() in forbidden_seed:
+            if (len(seed_password) < 12 or seed_password.lower() in forbidden_seed
+                    or seed_password.lower().startswith("tingting-seed-demo-")):
                 raise ValueError("SEED_PASSWORD must not use a default/demo password in production")
         return self
 

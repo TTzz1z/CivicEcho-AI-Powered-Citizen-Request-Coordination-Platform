@@ -1,23 +1,45 @@
 """Idempotent development/demo/E2E seed. The password must come from the environment."""
+import hashlib
+import io
+import json
+import logging
 import os
+import struct
+import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from . import storage as storage_module
+from .ai_schemas import validate_handling_response, validate_triage_response
+from .config import get_settings
 from .database import SessionLocal
 from .models import (
+    AiSuggestionModel,
+    AppealModel,
     AuditLogModel,
+    CategoryModel,
     DepartmentModel,
-    KbChunkModel,
+    FollowUpTaskModel,
     KbDocumentModel,
     KbEvalCaseModel,
+    NotificationModel,
+    PhoneFollowUpRecordModel,
+    TicketAttachmentModel,
+    TicketFeedbackModel,
     TicketModel,
     TicketStatusHistoryModel,
     UserModel,
+    WorkOrderHistoryModel,
     WorkOrderModel,
 )
 from .security import hash_password
+
+logger = logging.getLogger(__name__)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 DEPARTMENTS = (
@@ -1041,9 +1063,10 @@ def _password() -> str:
     password = os.getenv("SEED_PASSWORD") or os.getenv("LOCAL_SEED_PASSWORD")
     if not password or len(password) < 12:
         raise SystemExit("SEED_PASSWORD 必须通过环境变量显式设置且至少 12 个字符")
-    forbidden = {"password", "123456789012", "change-me", "admin123456", "tingting-seed-demo-2026"}
+    forbidden = {"password", "123456789012", "change-me", "admin123456"}
     app_env = (os.getenv("APP_ENV") or "development").strip().lower()
-    if password.lower() in forbidden and app_env in {"production", "prod"}:
+    is_legacy_demo = password.lower().startswith("tingting-seed-demo-")
+    if (password.lower() in forbidden or is_legacy_demo) and app_env in {"production", "prod"}:
         raise SystemExit("SEED_PASSWORD 不得在 production 使用默认或 demo 密码")
     if password.lower() in {"password", "123456789012", "change-me", "admin123456"}:
         raise SystemExit("SEED_PASSWORD 不得使用默认或弱密码")
@@ -1051,6 +1074,8 @@ def _password() -> str:
 
 
 def seed(profile: str | None = None) -> dict[str, int]:
+    if (os.getenv("APP_ENV") or get_settings().app_env).strip().lower() in {"production", "prod"}:
+        raise SystemExit("生产环境禁止加载演示数据。请使用 python -m app.bootstrap_admin。")
     profile = (profile or os.getenv("SEED_PROFILE", "demo")).lower()
     if profile not in {"development", "demo", "e2e"}:
         raise SystemExit("SEED_PROFILE 必须是 development、demo 或 e2e")
@@ -1081,42 +1106,8 @@ def seed(profile: str | None = None) -> dict[str, int]:
             counts["users"] += 1
         db.flush()
         if profile in {"demo", "development"}:
-            ticket_id = "QTDEMO000000000001"
-            ticket = db.scalar(select(TicketModel).where(TicketModel.ticket_id == ticket_id))
-            if not ticket:
-                now = datetime.now(timezone.utc)
-                ticket = TicketModel(
-                    ticket_id=ticket_id, idempotency_key="seed-demo-ticket-0001", request_type="咨询",
-                    description="演示数据：社区公共服务办理时间咨询", location="幸福路社区",
-                    timezone="Asia/Shanghai", source="seed", priority="normal", status="processing",
-                    creator_user_id=users["citizen_local"].id,
-                    assigned_department_id=department_ids["general-intake"],
-                    assigned_user_id=users["department_local"].id, accepted_at=now, version=3,
-                )
-                db.add(ticket)
-                db.flush()
-                db.add_all([
-                    TicketStatusHistoryModel(ticket_id=ticket_id, operator_user_id=users["agent_local"].id,
-                                             operation_type="accept", content="演示坐席受理", previous_status="pending", current_status="accepted", remark="演示坐席受理"),
-                    TicketStatusHistoryModel(ticket_id=ticket_id, operator_user_id=users["department_local"].id,
-                                             operation_type="process", content="演示部门处理中", previous_status="assigned", current_status="processing", remark="演示部门处理中"),
-                ])
-                db.add(AuditLogModel(actor_user_id=users["admin_local"].id, actor_type="user", action="seed_demo",
-                                     resource_type="ticket", resource_id=ticket_id, outcome="success", details='{"profile":"demo"}', request_id="seed-command"))
-                counts["tickets"] = 1
-            has_primary = db.scalar(select(WorkOrderModel.id).where(
-                WorkOrderModel.ticket_id == ticket_id,
-                WorkOrderModel.task_type == "primary",
-                WorkOrderModel.status.in_(("pending", "processing", "submitted")),
-            ))
-            if ticket.assigned_department_id and not has_primary:
-                db.add(WorkOrderModel(
-                    id=str(uuid4()), work_order_no=f"{ticket_id}-M-DEMO", ticket_id=ticket_id,
-                    task_type="primary", status="processing", department_id=ticket.assigned_department_id,
-                    assignee_user_id=ticket.assigned_user_id, instructions="演示主办任务",
-                    created_by_user_id=users["agent_local"].id, accepted_at=ticket.accepted_at,
-                ))
-                ticket.collaboration_status = "in_progress"
+            lifecycle_counts = _seed_demo_lifecycle(db, users, department_ids)
+            counts.update(lifecycle_counts)
 
         # KB is required for e2e smoke S4 (policy RAG citations). Skip demo ticket above for e2e isolation.
         if profile in {"demo", "development", "e2e"}:
@@ -1126,6 +1117,1969 @@ def seed(profile: str | None = None) -> dict[str, int]:
                 counts["kb_eval_cases"] = _seed_kb_eval_cases(db, kb_doc_ids_by_key)
         db.commit()
     return counts
+
+
+def _deterministic_uuid4(seed_key: str) -> str:
+    """Return a deterministic lowercase UUID4-format string matching worker ATTACHMENT_KEY."""
+    raw = bytearray(hashlib.sha256(f"civicecho-seed:{seed_key}".encode("utf-8")).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
+
+def _shanghai_day_anchor(now: datetime, days_ago: int, hour: int = 10, minute: int = 15) -> datetime:
+    """Return a UTC timestamp anchored to a specific Asia/Shanghai day offset in [0..13]."""
+    sh_now = now.astimezone(SHANGHAI_TZ)
+    day_start = sh_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_ago)
+    if days_ago == 0:
+        candidate = now - timedelta(minutes=25 + minute)
+        if candidate < day_start:
+            candidate = day_start + timedelta(minutes=10)
+        return candidate.astimezone(timezone.utc)
+    return day_start.replace(hour=hour, minute=minute).astimezone(timezone.utc)
+
+
+def _build_demo_pdf_bytes(heading: str, body_lines: list[str]) -> bytes:
+    """Build a valid single-page PDF 1.4 parseable by pypdf and pdfjs-dist."""
+    def _esc(text: str) -> str:
+        return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    stream_cmds = [
+        "0.11 0.27 0.53 rg",
+        "48 770 499 42 re f",
+        "1 1 1 rg",
+        f"BT /F1 15 Tf 62 786 Td ({_esc(heading)}) Tj ET",
+        "0.15 0.18 0.22 rg",
+        "48 748 499 1 re f",
+    ]
+    y = 720
+    for idx, line in enumerate(body_lines):
+        size = 11 if idx == 0 else 10
+        stream_cmds.append(f"BT /F1 {size} Tf 56 {y} Td ({_esc(line)}) Tj ET")
+        y -= 20
+    stream_bytes = ("\n".join(stream_cmds) + "\n").encode("latin-1")
+
+    objects: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream_bytes)).encode("ascii") + b" >>\nstream\n" + stream_bytes + b"endstream",
+    ]
+
+    chunks: list[bytes] = [b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"]
+    offsets: list[int] = [0]
+    for obj_num, body in enumerate(objects, start=1):
+        offsets.append(sum(len(c) for c in chunks))
+        chunks.append(f"{obj_num} 0 obj\n".encode("ascii") + body + b"\nendobj\n")
+
+    xref_offset = sum(len(c) for c in chunks)
+    xref_lines = [f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii")]
+    for off in offsets[1:]:
+        xref_lines.append(f"{off:010d} 00000 n \n".encode("ascii"))
+    trailer = (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n"
+    ).encode("ascii")
+    return b"".join(chunks + xref_lines + [trailer])
+
+
+def _build_demo_png_bytes(width: int = 160, height: int = 120) -> bytes:
+    """Build a valid RGB PNG image using stdlib zlib + CRC32."""
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", crc)
+
+    ihdr = struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            if y < 24:
+                rows.extend((28, 72, 138))
+            elif 34 <= y < 96 and 20 <= x < 140:
+                if 50 <= y < 78 and 68 <= x < 92:
+                    rows.extend((232, 148, 38))
+                else:
+                    rows.extend((216, 224, 234))
+            else:
+                rows.extend((244, 246, 249))
+    idat = zlib.compress(bytes(rows), level=6)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+
+def _seed_demo_lifecycle(
+    db,
+    users: dict[str, UserModel],
+    department_ids: dict[str, int],
+) -> dict[str, int]:
+    """Seed 18 realistic municipal tickets across 14 days and full sub-modules (demo/dev only)."""
+    now = datetime.now(timezone.utc)
+    categories_by_code = {
+        cat.code: cat.id for cat in db.scalars(select(CategoryModel)).all()
+    }
+    tickets_by_id = _seed_demo_tickets(db, users, department_ids, categories_by_code, now)
+    attachments_count = _seed_demo_attachments(db, users, department_ids, tickets_by_id, now)
+    ai_count = _seed_demo_ai_suggestions(db, users, department_ids, tickets_by_id, now)
+    aftercare_counts = _seed_demo_aftercare(db, users, tickets_by_id, now)
+    notifications_count = _seed_demo_notifications(db, users, tickets_by_id, now)
+    _seed_demo_audit_logs(db, users, tickets_by_id, now)
+    return {
+        "tickets": len(tickets_by_id),
+        "attachments": attachments_count,
+        "ai_suggestions": ai_count,
+        "notifications": notifications_count,
+        "follow_up_tasks": aftercare_counts["follow_up_tasks"],
+        "appeals": aftercare_counts["appeals"],
+    }
+
+
+def _seed_demo_tickets(
+    db,
+    users: dict[str, UserModel],
+    department_ids: dict[str, int],
+    categories_by_code: dict[str, int],
+    now: datetime,
+) -> dict[str, TicketModel]:
+    citizen_id = users["citizen_local"].id
+    agent_id = users["agent_local"].id
+    dept_user_id = users["department_local"].id
+    admin_id = users["admin_local"].id
+
+    def _dept(code: str | None) -> int | None:
+        return department_ids.get(code) if code else None
+
+    def _cat(code: str | None) -> int | None:
+        return categories_by_code.get(code) if code else None
+
+    t1_created = _shanghai_day_anchor(now, 1, hour=9, minute=30)
+    t1_accepted = t1_created + timedelta(minutes=35)
+    t2_created = _shanghai_day_anchor(now, 0, hour=10, minute=10)
+    t3_created = _shanghai_day_anchor(now, 0, hour=8, minute=20)
+    t4_created = _shanghai_day_anchor(now, 1, hour=14, minute=15)
+    t4_accepted = t4_created + timedelta(minutes=40)
+    t5_created = _shanghai_day_anchor(now, 2, hour=9, minute=45)
+    t5_accepted = t5_created + timedelta(minutes=30)
+    t6_created = _shanghai_day_anchor(now, 2, hour=15, minute=10)
+    t6_accepted = t6_created + timedelta(minutes=25)
+    t7_created = _shanghai_day_anchor(now, 3, hour=11, minute=5)
+    t7_accepted = t7_created + timedelta(minutes=50)
+    t8_created = _shanghai_day_anchor(now, 4, hour=10, minute=20)
+    t8_accepted = t8_created + timedelta(minutes=35)
+    t9_created = _shanghai_day_anchor(now, 5, hour=14, minute=40)
+    t9_accepted = t9_created + timedelta(minutes=45)
+    t10_created = _shanghai_day_anchor(now, 6, hour=9, minute=15)
+    t10_accepted = t10_created + timedelta(minutes=30)
+    t11_created = _shanghai_day_anchor(now, 7, hour=11, minute=30)
+    t11_accepted = t11_created + timedelta(minutes=40)
+    t12_created = _shanghai_day_anchor(now, 8, hour=13, minute=25)
+    t12_accepted = t12_created + timedelta(minutes=55)
+    t13_created = _shanghai_day_anchor(now, 9, hour=10, minute=5)
+    t13_accepted = t13_created + timedelta(minutes=35)
+    t13_resolved = t13_created + timedelta(hours=18)
+    t14_created = _shanghai_day_anchor(now, 10, hour=15, minute=20)
+    t14_accepted = t14_created + timedelta(minutes=45)
+    t14_resolved = t14_created + timedelta(hours=30)
+    t15_created = _shanghai_day_anchor(now, 11, hour=9, minute=50)
+    t15_accepted = t15_created + timedelta(minutes=25)
+    t15_resolved = t15_created + timedelta(hours=14)
+    t15_closed = t15_resolved + timedelta(hours=6)
+    t16_created = _shanghai_day_anchor(now, 12, hour=11, minute=10)
+    t16_accepted = t16_created + timedelta(minutes=40)
+    t16_resolved = t16_created + timedelta(hours=22)
+    t16_closed = t16_resolved + timedelta(hours=14)
+    t17_created = _shanghai_day_anchor(now, 13, hour=10, minute=30)
+    t17_accepted = t17_created + timedelta(minutes=50)
+    t17_resolved = t17_created + timedelta(hours=40)
+    t17_closed = t17_resolved + timedelta(hours=8)
+    t18_created = _shanghai_day_anchor(now, 13, hour=16, minute=15)
+
+    ticket_specs = [
+        {
+            "ticket_id": "QTDEMO000000000001",
+            "idempotency_key": "seed-demo-ticket-0001",
+            "request_type": "咨询",
+            "description": "演示数据：社区公共服务办理时间咨询",
+            "location": "幸福路社区",
+            "event": "公共服务大厅便民窗口咨询",
+            "occurred_at_text": "工作日 09:00-17:00",
+            "target": "社区便民服务中心",
+            "contact": "13800138001",
+            "source": "seed",
+            "priority": "normal",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("general-intake"),
+            "assigned_user_id": dept_user_id,
+            "category_id": _cat("CSGL-GGSS-GD"),
+            "collaboration_status": "in_progress",
+            "created_at": t1_created,
+            "accepted_at": t1_accepted,
+            "accept_due_at": t1_created + timedelta(hours=2),
+            "resolve_due_at": now + timedelta(hours=48),
+            "version": 3,
+            "history": [
+                ("accept", "pending", "accepted", agent_id, "演示坐席受理", "public", t1_accepted),
+                ("process", "assigned", "processing", dept_user_id, "演示部门处理中", "public", t1_accepted + timedelta(minutes=20)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QTDEMO000000000001-M-DEMO",
+                    "task_type": "primary",
+                    "status": "processing",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "演示主办任务",
+                    "accepted_at": t1_accepted,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发综合受理主办工单", t1_accepted),
+                        ("start", "pending", "processing", dept_user_id, "部门人员开始办理", t1_accepted + timedelta(minutes=20)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000002",
+            "idempotency_key": "seed-demo-ticket-0002",
+            "request_type": "投诉",
+            "description": "建设北路与新华街交叉口东侧连续三盏路灯夜间不亮，行人过街视线受阻。",
+            "location": "建设北路与新华街交叉口东侧",
+            "event": "夜间道路照明设施故障",
+            "occurred_at_text": "昨日夜间 20:30 起",
+            "target": "市政路灯养护所",
+            "contact": "13800138002",
+            "source": "web",
+            "priority": "normal",
+            "status": "pending",
+            "creator_user_id": citizen_id,
+            "category_id": _cat("CSGL-GGSS-LD"),
+            "collaboration_status": "none",
+            "created_at": t2_created,
+            "accept_due_at": now + timedelta(hours=24),
+            "resolve_due_at": now + timedelta(hours=72),
+            "version": 1,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交路灯故障投诉", "public", t2_created),
+            ],
+            "work_orders": [],
+        },
+        {
+            "ticket_id": "QT2026110000000003",
+            "idempotency_key": "seed-demo-ticket-0003",
+            "request_type": "求助",
+            "description": "东湖公园南门人行道附近雨水井盖松动翘起，存在行人绊倒隐患。",
+            "location": "东湖公园南门人行道",
+            "event": "雨水井盖松动存在安全隐患",
+            "occurred_at_text": "今日清晨 07:30",
+            "target": "市政设施巡查队",
+            "contact": "13800138003",
+            "source": "web",
+            "priority": "expedited",
+            "requested_priority": "urgent",
+            "status": "pending",
+            "needs_supplement": True,
+            "supplement_reason": "请补充具体路口方位参照物及井盖编号或现场照片，便于应急抢修车快速定位。",
+            "supplement_requested_at": now - timedelta(hours=1),
+            "creator_user_id": citizen_id,
+            "category_id": _cat("CSGL-GGSS-JG"),
+            "collaboration_status": "awaiting_citizen",
+            "created_at": t3_created,
+            "accept_due_at": now + timedelta(hours=3),
+            "resolve_due_at": now + timedelta(hours=24),
+            "version": 2,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交井盖隐患求助", "public", t3_created),
+                ("request_supplement", "pending", "pending", agent_id, "坐席退回请市民补充具体方位信息", "public", now - timedelta(hours=1)),
+            ],
+            "work_orders": [],
+        },
+        {
+            "ticket_id": "QT2026110000000004",
+            "idempotency_key": "seed-demo-ticket-0004",
+            "request_type": "投诉",
+            "description": "人民西路 88 号公交站台前非机动车道出现约 2 米长路面沉降破损，雨天积水溅湿行人。",
+            "location": "人民西路 88 号公交站台前非机动车道",
+            "event": "非机动车道路面破损积水",
+            "occurred_at_text": "近 3 日持续存在",
+            "target": "市政道路养护中心",
+            "contact": "13800138004",
+            "source": "web",
+            "priority": "expedited",
+            "status": "accepted",
+            "creator_user_id": citizen_id,
+            "category_id": _cat("CSGL-GGSS-DL"),
+            "collaboration_status": "none",
+            "created_at": t4_created,
+            "accepted_at": t4_accepted,
+            "accept_due_at": t4_created + timedelta(hours=2),
+            "resolve_due_at": now + timedelta(hours=3, minutes=20),
+            "version": 2,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交道路破损投诉", "public", t4_created),
+                ("accept", "pending", "accepted", agent_id, "坐席已核验受理，待派发道路养护部门", "public", t4_accepted),
+            ],
+            "work_orders": [],
+        },
+        {
+            "ticket_id": "QT2026110000000005",
+            "idempotency_key": "seed-demo-ticket-0005",
+            "request_type": "建议",
+            "description": "建议及时清理文昌路农贸市场北侧人行道长期占道堆放的废旧装修物料，恢复无障碍通行。",
+            "location": "文昌路农贸市场北侧人行道",
+            "event": "占道堆物影响通行建议清理",
+            "occurred_at_text": "近一周早晚高峰均可见",
+            "target": "街道综合执法中队",
+            "contact": "13900139005",
+            "source": "web_anonymous",
+            "anonymous_creator_key": "web-anon-demo-05",
+            "priority": "urgent",
+            "status": "accepted",
+            "category_id": _cat("CSGL-HW-ZW"),
+            "collaboration_status": "awaiting_dispatch",
+            "dispatch_return_reason": "现场核查发现堆放区域位于区交界绿地退线内，建议重新核定牵头执法单位后改派。",
+            "created_at": t5_created,
+            "accepted_at": t5_accepted,
+            "accept_due_at": t5_created + timedelta(hours=2),
+            "resolve_due_at": now - timedelta(hours=5),
+            "version": 3,
+            "history": [
+                ("create", None, "pending", None, "匿名市民提交占道堆物清理建议", "public", t5_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理工单", "public", t5_accepted),
+                ("assign", "accepted", "assigned", agent_id, "首次派发城市管理部门", "internal", t5_accepted + timedelta(minutes=15)),
+                ("return_to_agent", "assigned", "accepted", dept_user_id, "部门核查退回坐席重新派发", "internal", t5_accepted + timedelta(hours=3)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000005-M-1",
+                    "task_type": "primary",
+                    "status": "returned",
+                    "department_id": _dept("urban-management"),
+                    "instructions": "请现场核查占道堆物权属并责令限期清理。",
+                    "return_reason": "堆放区域跨区界绿化带，请坐席协调改派综合执法牵头。",
+                    "created_by_user_id": agent_id,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发城市管理主办任务", t5_accepted + timedelta(minutes=15)),
+                        ("return_to_agent", "pending", "returned", dept_user_id, "权属界限需确认，退回坐席重新派发", t5_accepted + timedelta(hours=3)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000006",
+            "idempotency_key": "seed-demo-ticket-0006",
+            "request_type": "投诉",
+            "description": "翠微园小区 3 号楼二次供水加压泵昨晚起水压明显不足，高楼层早高峰无法正常用水。",
+            "location": "翠微园小区 3 号楼",
+            "event": "高楼层供水压力不足",
+            "occurred_at_text": "昨晚 21:00 至今",
+            "target": "供水保障与综合协调专班",
+            "contact": "13800138006",
+            "source": "web",
+            "priority": "normal",
+            "status": "assigned",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("general-intake"),
+            "assigned_user_id": dept_user_id,
+            "category_id": _cat("CSGL-GS-TS"),
+            "collaboration_status": "in_progress",
+            "created_at": t6_created,
+            "accepted_at": t6_accepted,
+            "accept_due_at": t6_created + timedelta(hours=1),
+            "resolve_due_at": now + timedelta(hours=36),
+            "version": 3,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交二次供水压力不足投诉", "public", t6_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t6_accepted),
+                ("assign", "accepted", "assigned", agent_id, "已派发综合受理部门（待部门接办）", "public", t6_accepted + timedelta(minutes=15)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000006-M-1",
+                    "task_type": "primary",
+                    "status": "pending",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "请联动物业及水务公司排查 3 号楼二次供水泵房变频稳压设备。",
+                    "created_by_user_id": agent_id,
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建综合受理主办任务，待签收办理", t6_accepted + timedelta(minutes=15)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000007",
+            "idempotency_key": "seed-demo-ticket-0007",
+            "request_type": "建议",
+            "description": "建议在高新二路地铁 B 口新增高峰期微循环接驳公交停靠标志牌并优化早高峰发车间隔。",
+            "location": "高新二路地铁站 B 口",
+            "event": "地铁口公交接驳站牌及班次优化建议",
+            "occurred_at_text": "工作日早高峰 07:45-08:45",
+            "target": "市交通运输局公交运营科",
+            "contact": "13800138007",
+            "source": "web",
+            "priority": "expedited",
+            "status": "assigned",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("transport"),
+            "category_id": _cat("CSGL-GGSS-DL"),
+            "collaboration_status": "in_progress",
+            "created_at": t7_created,
+            "accepted_at": t7_accepted,
+            "accept_due_at": t7_created + timedelta(hours=2),
+            "resolve_due_at": now + timedelta(hours=2, minutes=30),
+            "version": 3,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交公交接驳建议", "public", t7_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理并设为加急", "public", t7_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发交通运输部门核研", "public", t7_accepted + timedelta(minutes=12)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000007-M-1",
+                    "task_type": "primary",
+                    "status": "pending",
+                    "department_id": _dept("transport"),
+                    "instructions": "请结合早高峰客流监测评估接驳站点及班次优化方案。",
+                    "created_by_user_id": agent_id,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发交通运输主办任务", t7_accepted + timedelta(minutes=12)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000008",
+            "idempotency_key": "seed-demo-ticket-0008",
+            "request_type": "投诉",
+            "description": "滨河小区西门垃圾分类转运点连续四天未及时清运，厨余垃圾渗滤液外溢并伴随异味。",
+            "location": "滨河小区西门垃圾分类转运点",
+            "event": "生活垃圾滞留外溢异味投诉",
+            "occurred_at_text": "已持续 4 天",
+            "target": "环卫清运中心及街道办事处",
+            "contact": "13800138008",
+            "source": "web",
+            "priority": "major",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("urban-management"),
+            "category_id": _cat("CSGL-HW-LJ"),
+            "collaboration_status": "in_progress",
+            "created_at": t8_created,
+            "accepted_at": t8_accepted,
+            "accept_due_at": t8_created + timedelta(hours=2),
+            "resolve_due_at": now - timedelta(hours=8),
+            "version": 4,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民上传现场照片并提交重大环卫投诉", "public", t8_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理并升级为重大优先", "public", t8_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发城市管理主办、综合受理协办", "public", t8_accepted + timedelta(minutes=15)),
+                ("process", "assigned", "processing", dept_user_id, "主协办部门联合开展清运消杀与台账核查", "public", t8_accepted + timedelta(hours=1)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000008-M-1",
+                    "task_type": "primary",
+                    "status": "processing",
+                    "department_id": _dept("urban-management"),
+                    "instructions": "立即调度清运车辆完成积存垃圾清理并冲洗地面渗滤液。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t8_accepted + timedelta(hours=1),
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建城市管理主办工单", t8_accepted + timedelta(minutes=15)),
+                        ("start", "pending", "processing", agent_id, "城市管理处接单处置中", t8_accepted + timedelta(hours=1)),
+                    ],
+                },
+                {
+                    "work_order_no": "QT2026110000000008-C-1",
+                    "task_type": "support",
+                    "status": "processing",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "请协助对接属地物业明确转运站日常保洁责任界面。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t8_accepted + timedelta(hours=1, minutes=10),
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建综合受理协办工单", t8_accepted + timedelta(minutes=15)),
+                        ("start", "pending", "processing", dept_user_id, "综合受理窗口协调物业核查中", t8_accepted + timedelta(hours=1, minutes=10)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000009",
+            "idempotency_key": "seed-demo-ticket-0009",
+            "request_type": "投诉",
+            "description": "金桂苑地下车库出入口排水沟长期淤堵，暴雨后形成 15 厘米深积水影响车辆通行。",
+            "location": "金桂苑小区地下车库北出口",
+            "event": "车库排水沟淤堵积水",
+            "occurred_at_text": "前日降雨后持续积水",
+            "target": "金桂苑物业服务中心",
+            "contact": "13800138009",
+            "source": "web",
+            "priority": "normal",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("housing-property"),
+            "category_id": _cat("CSGL-GS-JS"),
+            "collaboration_status": "awaiting_summary",
+            "created_at": t9_created,
+            "accepted_at": t9_accepted,
+            "accept_due_at": t9_created + timedelta(hours=1),
+            "resolve_due_at": now + timedelta(hours=40),
+            "version": 5,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交车库积水投诉", "public", t9_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t9_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发住房物业主办、综合受理协办", "public", t9_accepted + timedelta(minutes=20)),
+                ("process", "assigned", "processing", dept_user_id, "主协办均已提交阶段处置结果，待主办方汇总上报", "public", t9_accepted + timedelta(hours=6)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000009-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("housing-property"),
+                    "instructions": "督促物业开展雨水篦子清掏和潜污泵检修。",
+                    "result_summary": "已责成物业完成淤泥清掏并更换 2 台排水泵。",
+                    "result_measures": "疏通排水明沟 65 米，增设高水位报警浮球。",
+                    "result_outcome": "resolved",
+                    "public_content": "小区车库出口积水已抽排清理并完成泵站检修。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t9_accepted + timedelta(hours=1),
+                    "submitted_at": t9_accepted + timedelta(hours=6),
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建住房物业主办任务", t9_accepted + timedelta(minutes=20)),
+                        ("submit_result", "processing", "submitted", agent_id, "主办部门已提交现场清掏结果", t9_accepted + timedelta(hours=6)),
+                    ],
+                },
+                {
+                    "work_order_no": "QT2026110000000009-C-1",
+                    "task_type": "support",
+                    "status": "submitted",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "配合核查市政雨水管网接驳口通畅情况。",
+                    "result_summary": "市政支管网接驳口畅通无倒灌。",
+                    "result_measures": "联合市政管网巡检队开井核验管网液位。",
+                    "result_outcome": "resolved",
+                    "public_content": "外网市政接驳口核验正常。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t9_accepted + timedelta(hours=1),
+                    "submitted_at": t9_accepted + timedelta(hours=5),
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建综合受理协办任务", t9_accepted + timedelta(minutes=20)),
+                        ("submit_result", "processing", "submitted", dept_user_id, "协办部门提交管网核验结果", t9_accepted + timedelta(hours=5)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000010",
+            "idempotency_key": "seed-demo-ticket-0010",
+            "request_type": "求助",
+            "description": "学府巷老旧小区 2 单元楼道公共照明及应急电源箱跳闸停电，晚间老人上下楼不便。",
+            "location": "学府巷 14 号院 2 单元",
+            "event": "老旧小区楼道公共供电故障",
+            "occurred_at_text": "本周初起频繁跳闸",
+            "target": "供电应急保障联席办",
+            "contact": "13800138010",
+            "source": "web",
+            "priority": "expedited",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("general-intake"),
+            "assigned_user_id": dept_user_id,
+            "category_id": _cat("CSGL-GGSS-GD"),
+            "collaboration_status": "awaiting_review",
+            "review_draft": {
+                "resolution_summary": "已完成学府巷 14 号院 2 单元公共照明配电箱空开更换及老化线路整治，楼道照明恢复正常。",
+                "resolution_measures": "1. 联合街道电工与供电抢修班现场排查漏电支路；2. 更换 32A 漏电保护器并重接 1-6 层感应灯线路；3. 张贴安全用电提示。",
+                "resolution_outcome": "resolved",
+                "public_reply": "您好，您反映的学府巷 14 号院 2 单元楼道公共供电跳闸问题，经现场更换漏电保护器并整修受潮线路后已恢复稳定供电，楼道照明正常。",
+                "internal_note": "已附供电维修确认单 PDF，提请坐席/管理员复核办结。",
+            },
+            "created_at": t10_created,
+            "accepted_at": t10_accepted,
+            "accept_due_at": t10_created + timedelta(hours=1),
+            "resolve_due_at": now + timedelta(hours=3),
+            "version": 5,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交楼道供电故障求助", "public", t10_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t10_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发综合受理统筹供电应急维修", "public", t10_accepted + timedelta(minutes=20)),
+                ("submit_for_review", "processing", "processing", dept_user_id, "部门提交办结汇总草稿，等待坐席复核", "public", now - timedelta(hours=4)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000010-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "请协调街道电工与供电所核查楼道照明跳闸隐患并形成整改确认单。",
+                    "result_summary": "已更换漏电保护开关并恢复楼道供电。",
+                    "result_measures": "排查受潮线盒 3 处并更换防潮接线端子。",
+                    "result_outcome": "resolved",
+                    "public_content": "学府巷 14 号院 2 单元楼道供电已恢复稳定。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t10_accepted + timedelta(minutes=40),
+                    "submitted_at": now - timedelta(hours=4),
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发综合受理主办工单", t10_accepted + timedelta(minutes=20)),
+                        ("start", "pending", "processing", dept_user_id, "部门接办并联动电工排查", t10_accepted + timedelta(minutes=40)),
+                        ("submit_result", "processing", "submitted", dept_user_id, "提交维修确认单并进入待复核", now - timedelta(hours=4)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000011",
+            "idempotency_key": "seed-demo-ticket-0011",
+            "request_type": "投诉",
+            "description": "梧桐大道 32 号院门前大型法桐因大风倾斜压靠架空线缆，需园林专家评估后停电修剪。",
+            "location": "梧桐大道 32 号院门前",
+            "event": "行道树倾斜压线隐患（SLA暂停及复核退回）",
+            "occurred_at_text": "大风天气后持续倾斜",
+            "target": "园林应急抢险队",
+            "contact": "13800138011",
+            "source": "web",
+            "priority": "urgent",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("general-intake"),
+            "assigned_user_id": dept_user_id,
+            "category_id": _cat("CSGL-YL-SM"),
+            "collaboration_status": "in_progress",
+            "sla_paused_at": now - timedelta(hours=2),
+            "sla_pause_reason": "需供电公司安排计划停电窗口并由园林安全专家现场评估倒伏风险，SLA 计时依法暂停。",
+            "total_paused_seconds": 7200,
+            "created_at": t11_created,
+            "accepted_at": t11_accepted,
+            "accept_due_at": t11_created + timedelta(hours=1),
+            "resolve_due_at": now + timedelta(hours=24),
+            "version": 6,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民投诉行道树倾斜压线", "public", t11_created),
+                ("accept", "pending", "accepted", agent_id, "坐席紧急受理", "public", t11_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发综合受理统筹安全排险", "public", t11_accepted + timedelta(minutes=15)),
+                ("return_to_department", "processing", "processing", agent_id, "复核退回：请补充树体安全鉴定结论及停电排险计划", "internal", now - timedelta(hours=3)),
+                ("pause_sla", "processing", "processing", agent_id, "因等待电力停电作业窗口，已暂停 SLA 计时", "public", now - timedelta(hours=2)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000011-M-1",
+                    "task_type": "primary",
+                    "status": "processing",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "请协调园林绿化与供电局开展带电安全评估并制定排险修剪方案。",
+                    "return_reason": "复核退回：原提交方案缺少架空线缆停电配合时间表，请补充完善后重报。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t11_accepted + timedelta(minutes=30),
+                    "history": [
+                        ("create", None, "pending", agent_id, "创建综合受理主办工单", t11_accepted + timedelta(minutes=15)),
+                        ("start", "pending", "processing", dept_user_id, "部门组织现场警戒围挡", t11_accepted + timedelta(minutes=30)),
+                        ("submit_result", "processing", "submitted", dept_user_id, "首次提交临时支撑处理说明", now - timedelta(hours=5)),
+                        ("return_to_department", "submitted", "processing", agent_id, "复核退回部门补充安全评估与停电配合计划", now - timedelta(hours=3)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000012",
+            "idempotency_key": "seed-demo-ticket-0012",
+            "request_type": "求助",
+            "description": "育才实验小学北侧围墙外绿化带灌木枝条遮挡校门口斑马线视野，申诉要求彻底修剪并增设警示。",
+            "location": "育才实验小学北门斑马线旁",
+            "event": "校园周边绿化遮挡视线申诉重办",
+            "occurred_at_text": "接送学时段存在视线盲区",
+            "target": "教育安全协调办及园林养护单位",
+            "contact": "13800138012",
+            "source": "web",
+            "priority": "normal",
+            "status": "processing",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("education"),
+            "category_id": _cat("CSGL-YL-LH"),
+            "collaboration_status": "in_progress",
+            "handling_round": 2,
+            "appeal_count": 1,
+            "created_at": t12_created,
+            "accepted_at": t12_accepted,
+            "accept_due_at": t12_created + timedelta(hours=2),
+            "resolve_due_at": now + timedelta(hours=52),
+            "version": 7,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交校园周边视野遮挡求助", "public", t12_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t12_accepted),
+                ("resolve", "processing", "resolved", agent_id, "第 1 轮修剪后办结", "public", t12_created + timedelta(days=2)),
+                ("submit_appeal", "resolved", "resolved", citizen_id, "市民提交第 1 次申诉：东侧转角仍有遮挡", "public", t12_created + timedelta(days=3)),
+                ("appeal_approved", "resolved", "processing", admin_id, "管理员审批通过申诉，进入第 2 轮重办并加派复核任务", "public", now - timedelta(days=1)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000012-M-2",
+                    "task_type": "primary",
+                    "status": "processing",
+                    "department_id": _dept("education"),
+                    "instructions": "请教育部门会同学校对北门东侧转角灌木做低矮化修剪并核验视野通透度。",
+                    "created_by_user_id": admin_id,
+                    "accepted_at": now - timedelta(hours=18),
+                    "history": [
+                        ("appeal_reprocess", None, "processing", admin_id, "申诉重办第 2 轮主办工单启动", now - timedelta(hours=18)),
+                    ],
+                },
+                {
+                    "work_order_no": "QT2026110000000012-R-2",
+                    "task_type": "review",
+                    "status": "pending",
+                    "department_id": _dept("general-intake"),
+                    "assignee_user_id": dept_user_id,
+                    "instructions": "请综合受理窗口作为复核协办方实地抽验修剪后通行视野。",
+                    "created_by_user_id": admin_id,
+                    "history": [
+                        ("create", None, "pending", admin_id, "派发申诉复核协办任务，待综合受理接办", now - timedelta(hours=18)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000013",
+            "idempotency_key": "seed-demo-ticket-0013",
+            "request_type": "咨询",
+            "description": "咨询南湖社区卫生服务中心秋季老年人免费流感疫苗接种预约流程及周六开诊时段。",
+            "location": "南湖社区卫生服务中心",
+            "event": "社区医疗便民服务接种时间咨询",
+            "occurred_at_text": "本月接种周期",
+            "target": "市卫健委基层医疗科",
+            "contact": "13800138013",
+            "source": "web",
+            "priority": "normal",
+            "status": "resolved",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("health"),
+            "category_id": _cat("CSGL-GGSS-LD"),
+            "collaboration_status": "completed",
+            "resolution_summary": "已核实并向市民公布南湖社区卫生服务中心接种时间及线上线下双通道预约方式。",
+            "resolution_measures": "核对卫健基层科最新门诊排班，明确周六上午 08:30-11:30 开放老年人专场接种。",
+            "resolution_outcome": "resolved",
+            "public_reply": "您好，南湖社区卫生服务中心每周二、四、六上午 08:30-11:30 开放 60 岁以上户籍/常住老年人免费流感疫苗接种，可凭身份证现场取号或通过市健康服务小程序提前预约。",
+            "created_at": t13_created,
+            "accepted_at": t13_accepted,
+            "resolved_at": t13_resolved,
+            "accept_due_at": t13_created + timedelta(hours=2),
+            "resolve_due_at": t13_created + timedelta(hours=48),
+            "version": 4,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交社区接种服务咨询", "public", t13_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t13_accepted),
+                ("assign", "accepted", "assigned", agent_id, "派发医疗卫生部门", "public", t13_accepted + timedelta(minutes=15)),
+                ("resolve", "processing", "resolved", agent_id, "答复已生成，等待市民确认评价", "public", t13_resolved),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000013-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("health"),
+                    "instructions": "核实最新门诊排班及预约渠道并答复市民。",
+                    "result_summary": "已核实周六上午专场接种排班。",
+                    "result_outcome": "resolved",
+                    "public_content": "已提供详细接种时段及预约渠道。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t13_accepted + timedelta(minutes=45),
+                    "submitted_at": t13_resolved - timedelta(hours=1),
+                    "completed_at": t13_resolved,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发医疗卫生主办任务", t13_accepted + timedelta(minutes=15)),
+                        ("submit_result", "processing", "submitted", agent_id, "医疗卫生部门提交完整答复", t13_resolved - timedelta(hours=1)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000014",
+            "idempotency_key": "seed-demo-ticket-0014",
+            "request_type": "投诉",
+            "description": "康乐家园东区老年人助餐点周边晚间厨余垃圾桶占道堆放且清运不及时，影响一楼住户开窗通风。",
+            "location": "康乐家园东区 1 号楼南侧",
+            "event": "社区助餐点垃圾清运频次投诉及申诉",
+            "occurred_at_text": "每日晚间 19:00 后",
+            "target": "社区居委会及保洁单位",
+            "contact": "13800138014",
+            "source": "web",
+            "priority": "normal",
+            "status": "resolved",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("community-civil"),
+            "category_id": _cat("CSGL-HW-LJ"),
+            "collaboration_status": "completed",
+            "resolution_summary": "已要求社区助餐点在晚餐收餐后及时加盖并将垃圾桶移回封闭暂存间。",
+            "resolution_measures": "约谈助餐点运营方并增加晚间 20:00 清运班次检查。",
+            "resolution_outcome": "partially_resolved",
+            "public_reply": "您好，已督促助餐点将垃圾桶移回指定暂存区并落实加盖要求，社区网格员将加强晚间巡查。",
+            "appeal_count": 1,
+            "created_at": t14_created,
+            "accepted_at": t14_accepted,
+            "resolved_at": t14_resolved,
+            "accept_due_at": t14_created + timedelta(hours=2),
+            "resolve_due_at": t14_created + timedelta(hours=48),
+            "version": 5,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交社区环境卫生投诉", "public", t14_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t14_accepted),
+                ("resolve", "processing", "resolved", agent_id, "部门提交整改回复", "public", t14_resolved),
+                ("citizen_feedback", "resolved", "resolved", citizen_id, "市民评价不满意：晚间仍有异味", "public", t14_resolved + timedelta(hours=10)),
+                ("submit_appeal", "resolved", "resolved", citizen_id, "市民提交第 1 次申诉，等待管理员审核", "public", t14_resolved + timedelta(hours=12)),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000014-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("community-civil"),
+                    "instructions": "督促社区助餐点规范垃圾桶存放并加盖清运。",
+                    "result_summary": "已约定晚间收餐后统一归位暂存间。",
+                    "result_outcome": "partially_resolved",
+                    "public_content": "社区将加强晚间保洁巡查频次。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t14_accepted + timedelta(hours=1),
+                    "submitted_at": t14_resolved - timedelta(hours=2),
+                    "completed_at": t14_resolved,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发社区民政主办任务", t14_accepted + timedelta(minutes=20)),
+                        ("submit_result", "processing", "submitted", agent_id, "提交阶段整改结果", t14_resolved - timedelta(hours=2)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000015",
+            "idempotency_key": "seed-demo-ticket-0015",
+            "request_type": "投诉",
+            "description": "青云路中段 12 号至 18 号路段夜间路灯全段熄灭，造成沿线商铺及居民通行不便。",
+            "location": "青云路中段 12-18 号",
+            "event": "成片路灯熄灭故障抢修",
+            "occurred_at_text": "11 天前夜间",
+            "target": "市政路灯抢修班",
+            "contact": "13800138015",
+            "source": "web",
+            "priority": "normal",
+            "status": "closed",
+            "closure_type": "citizen_confirmed",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("urban-management"),
+            "category_id": _cat("CSGL-GGSS-LD"),
+            "collaboration_status": "completed",
+            "resolution_summary": "已修复青云路中段地下电缆接头故障，全段 14 盏路灯恢复正常亮灯。",
+            "resolution_measures": "使用故障仪定位 16 号杆地下电缆断点并重新压接防水接头。",
+            "resolution_outcome": "resolved",
+            "public_reply": "您好，青云路中段路灯控制箱及地下电缆接头已抢修完毕，夜间测试照度达标并已恢复正常照明。",
+            "appeal_count": 1,
+            "created_at": t15_created,
+            "accepted_at": t15_accepted,
+            "resolved_at": t15_resolved,
+            "closed_at": t15_closed,
+            "accept_due_at": t15_created + timedelta(hours=1),
+            "resolve_due_at": t15_created + timedelta(hours=24),
+            "version": 6,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民提交路灯故障投诉", "public", t15_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t15_accepted),
+                ("resolve", "processing", "resolved", agent_id, "抢修完成等待市民评价", "public", t15_resolved),
+                ("close", "resolved", "closed", citizen_id, "市民评价满意并确认办结", "public", t15_closed),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000015-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("urban-management"),
+                    "instructions": "排查青云路中段路灯回路并完成电缆抢修。",
+                    "result_summary": "已修复电缆接头并全线亮灯。",
+                    "result_outcome": "resolved",
+                    "public_content": "青云路中段路灯已恢复正常运行。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t15_accepted + timedelta(minutes=30),
+                    "submitted_at": t15_resolved - timedelta(hours=1),
+                    "completed_at": t15_resolved,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发城市管理主办任务", t15_accepted + timedelta(minutes=10)),
+                        ("submit_result", "processing", "submitted", agent_id, "提交抢修验收结果", t15_resolved - timedelta(hours=1)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000016",
+            "idempotency_key": "seed-demo-ticket-0016",
+            "request_type": "建议",
+            "description": "建议维修星海广场西侧公交候车亭破损顶棚玻璃并增设夜间防滑盲道提示。",
+            "location": "星海广场西侧公交站",
+            "event": "公交候车亭设施修缮建议",
+            "occurred_at_text": "12 天前反映",
+            "target": "公交场站运维中心",
+            "contact": "13900139016",
+            "source": "web_anonymous",
+            "anonymous_creator_key": "web-anon-demo-16",
+            "priority": "normal",
+            "status": "closed",
+            "closure_type": "phone_confirmed",
+            "assigned_department_id": _dept("transport"),
+            "category_id": _cat("CSGL-GGSS-DL"),
+            "collaboration_status": "completed",
+            "resolution_summary": "已更换候车亭钢化顶棚并完成站台盲道防滑条修复。",
+            "resolution_measures": "拆除破损夹胶玻璃并安装防爆聚碳酸酯雨棚，补齐 8 米止滑盲道砖。",
+            "resolution_outcome": "resolved",
+            "public_reply": "您好，星海广场西侧公交站候车亭顶棚及站台防滑盲道均已修缮完毕，感谢您的宝贵建议。",
+            "created_at": t16_created,
+            "accepted_at": t16_accepted,
+            "resolved_at": t16_resolved,
+            "closed_at": t16_closed,
+            "accept_due_at": t16_created + timedelta(hours=2),
+            "resolve_due_at": t16_created + timedelta(hours=48),
+            "version": 5,
+            "history": [
+                ("create", None, "pending", None, "匿名市民提交公交候车亭修缮建议", "public", t16_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t16_accepted),
+                ("resolve", "processing", "resolved", agent_id, "交通运输部门完成修缮", "public", t16_resolved),
+                ("phone_follow_up_close", "resolved", "closed", agent_id, "坐席电话回访市民确认满意并办结", "public", t16_closed),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000016-M-1",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("transport"),
+                    "instructions": "修缮星海广场公交候车亭顶棚并核查盲道安全。",
+                    "result_summary": "顶棚及防滑盲道均已更换验收。",
+                    "result_outcome": "resolved",
+                    "public_content": "候车亭修缮工程已完成。",
+                    "created_by_user_id": agent_id,
+                    "accepted_at": t16_accepted + timedelta(hours=1),
+                    "submitted_at": t16_resolved - timedelta(hours=1),
+                    "completed_at": t16_resolved,
+                    "history": [
+                        ("create", None, "pending", agent_id, "派发交通运输主办任务", t16_accepted + timedelta(minutes=20)),
+                        ("submit_result", "processing", "submitted", agent_id, "提交修缮验收记录", t16_resolved - timedelta(hours=1)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000017",
+            "idempotency_key": "seed-demo-ticket-0017",
+            "request_type": "求助",
+            "description": "阳光社区老年人活动室门前无障碍坡道坡度偏陡且缺少防滑条，申诉复核要求二次整改。",
+            "location": "阳光社区服务中心东门",
+            "event": "无障碍坡道整改申诉办结",
+            "occurred_at_text": "13 天前提交",
+            "target": "社区民政服务站",
+            "contact": "13800138017",
+            "source": "web",
+            "priority": "expedited",
+            "status": "closed",
+            "closure_type": "admin_override",
+            "creator_user_id": citizen_id,
+            "assigned_department_id": _dept("community-civil"),
+            "category_id": _cat("CSGL-YL-LH"),
+            "collaboration_status": "completed",
+            "handling_round": 2,
+            "appeal_count": 1,
+            "resolution_summary": "经二次整改已加长无障碍缓坡并铺设金刚砂防滑条与双侧扶手，验收合格。",
+            "resolution_measures": "按无障碍设计规范将坡道比调整为 1:12，加装不锈钢双层扶手及防滑条。",
+            "resolution_outcome": "resolved",
+            "public_reply": "您好，阳光社区服务中心东门无障碍坡道已完成二次扩坡及防滑扶手加装工程，现已投入使用。",
+            "created_at": t17_created,
+            "accepted_at": t17_accepted,
+            "resolved_at": t17_resolved,
+            "closed_at": t17_closed,
+            "accept_due_at": t17_created + timedelta(hours=2),
+            "resolve_due_at": t17_created + timedelta(hours=24),
+            "version": 7,
+            "history": [
+                ("create", None, "pending", citizen_id, "市民求助整改社区无障碍坡道", "public", t17_created),
+                ("accept", "pending", "accepted", agent_id, "坐席受理", "public", t17_accepted),
+                ("appeal_approved", "resolved", "processing", admin_id, "申诉通过并重新派发二次整改", "public", t17_created + timedelta(hours=26)),
+                ("resolve", "processing", "resolved", admin_id, "二次整改验收合格", "public", t17_resolved),
+                ("admin_close", "resolved", "closed", admin_id, "管理员复核确认办结归档", "public", t17_closed),
+            ],
+            "work_orders": [
+                {
+                    "work_order_no": "QT2026110000000017-M-2",
+                    "task_type": "primary",
+                    "status": "submitted",
+                    "department_id": _dept("community-civil"),
+                    "instructions": "按 1:12 坡度标准落实无障碍坡道二次整改。",
+                    "result_summary": "坡道整改及扶手安装已完成验收。",
+                    "result_outcome": "resolved",
+                    "public_content": "已完成坡道防滑与坡度整改。",
+                    "created_by_user_id": admin_id,
+                    "accepted_at": t17_created + timedelta(hours=27),
+                    "submitted_at": t17_resolved - timedelta(hours=1),
+                    "completed_at": t17_resolved,
+                    "history": [
+                        ("appeal_reprocess", None, "processing", admin_id, "申诉二次整改派发", t17_created + timedelta(hours=27)),
+                        ("submit_result", "processing", "submitted", agent_id, "社区民政提交二次整改验收材料", t17_resolved - timedelta(hours=1)),
+                    ],
+                },
+            ],
+        },
+        {
+            "ticket_id": "QT2026110000000018",
+            "idempotency_key": "seed-demo-ticket-0018",
+            "request_type": "投诉",
+            "description": "反映京津高速 K42 收费站出省方向货车通行ETC车道识别延迟问题。",
+            "location": "京津高速 K42 收费站",
+            "event": "跨省高速公路收费站车道识别投诉（非市属管辖）",
+            "occurred_at_text": "13 天前",
+            "target": "高速公路运营公司",
+            "contact": "13900139018",
+            "source": "web_anonymous",
+            "anonymous_creator_key": "web-anon-demo-18",
+            "priority": "normal",
+            "status": "rejected",
+            "category_id": _cat("CSGL-GGSS-JG"),
+            "collaboration_status": "none",
+            "needs_supplement": False,
+            "rejection_reason_code": "out_of_jurisdiction",
+            "rejection_detail": "京津高速 K42 收费站属省级高速公路运营集团管辖，超出本市市政便民热线受理权限，已向来电人提供省级高速服务渠道指引。",
+            "suggested_channel": "请拨打全国交通运输服务监督热线 12328 或联系省级高速公路客户服务中心。",
+            "created_at": t18_created,
+            "accept_due_at": t18_created + timedelta(hours=2),
+            "version": 2,
+            "history": [
+                ("create", None, "pending", None, "匿名市民提交高速公路收费站投诉", "public", t18_created),
+                ("reject", "pending", "rejected", agent_id, "非本市受理管辖范围，依法不予受理并指引转办渠道", "public", t18_created + timedelta(minutes=35)),
+            ],
+            "work_orders": [],
+        },
+    ]
+
+    tickets_by_id: dict[str, TicketModel] = {}
+    for spec in ticket_specs:
+        tid = spec["ticket_id"]
+        ticket = db.scalar(select(TicketModel).where(TicketModel.ticket_id == tid))
+        if not ticket:
+            ticket = TicketModel(
+                ticket_id=tid,
+                idempotency_key=spec["idempotency_key"],
+                request_type=spec["request_type"],
+                description=spec["description"],
+                location=spec["location"],
+                event=spec.get("event"),
+                occurred_at_text=spec.get("occurred_at_text"),
+                timezone="Asia/Shanghai",
+                target=spec.get("target"),
+                contact=spec.get("contact"),
+                creator_user_id=spec.get("creator_user_id"),
+                anonymous_creator_key=spec.get("anonymous_creator_key"),
+                assigned_department_id=spec.get("assigned_department_id"),
+                assigned_user_id=spec.get("assigned_user_id"),
+                category_id=spec.get("category_id"),
+                requested_priority=spec.get("requested_priority"),
+                priority=spec["priority"],
+                status=spec["status"],
+                source=spec["source"],
+                accepted_at=spec.get("accepted_at"),
+                resolved_at=spec.get("resolved_at"),
+                closed_at=spec.get("closed_at"),
+                accept_due_at=spec.get("accept_due_at"),
+                resolve_due_at=spec.get("resolve_due_at"),
+                sla_paused_at=spec.get("sla_paused_at"),
+                sla_pause_reason=spec.get("sla_pause_reason"),
+                total_paused_seconds=spec.get("total_paused_seconds", 0),
+                resolution_summary=spec.get("resolution_summary"),
+                resolution_measures=spec.get("resolution_measures"),
+                resolution_outcome=spec.get("resolution_outcome"),
+                public_reply=spec.get("public_reply"),
+                review_draft=spec.get("review_draft"),
+                rejection_reason_code=spec.get("rejection_reason_code"),
+                rejection_detail=spec.get("rejection_detail"),
+                suggested_channel=spec.get("suggested_channel"),
+                needs_supplement=spec.get("needs_supplement", False),
+                supplement_reason=spec.get("supplement_reason"),
+                supplement_requested_at=spec.get("supplement_requested_at"),
+                dispatch_return_reason=spec.get("dispatch_return_reason"),
+                closure_type=spec.get("closure_type"),
+                handling_round=spec.get("handling_round", 1),
+                appeal_count=spec.get("appeal_count", 0),
+                collaboration_status=spec["collaboration_status"],
+                version=spec["version"],
+                created_at=spec["created_at"],
+                updated_at=spec.get("closed_at") or spec.get("resolved_at") or spec.get("accepted_at") or spec["created_at"],
+            )
+            db.add(ticket)
+            db.flush()
+        else:
+            # Idempotently enrich missing SLA/category/collaboration metadata (e.g. legacy QTDEMO000000000001).
+            if ticket.category_id is None and spec.get("category_id") is not None:
+                ticket.category_id = spec["category_id"]
+            if ticket.accept_due_at is None and spec.get("accept_due_at") is not None:
+                ticket.accept_due_at = spec["accept_due_at"]
+            if ticket.resolve_due_at is None and spec.get("resolve_due_at") is not None:
+                ticket.resolve_due_at = spec["resolve_due_at"]
+            if ticket.event is None and spec.get("event") is not None:
+                ticket.event = spec["event"]
+            if ticket.occurred_at_text is None and spec.get("occurred_at_text") is not None:
+                ticket.occurred_at_text = spec["occurred_at_text"]
+            if ticket.target is None and spec.get("target") is not None:
+                ticket.target = spec["target"]
+            if ticket.contact is None and spec.get("contact") is not None:
+                ticket.contact = spec["contact"]
+
+        tickets_by_id[tid] = ticket
+
+        has_history = db.scalar(
+            select(TicketStatusHistoryModel.id)
+            .where(TicketStatusHistoryModel.ticket_id == tid)
+            .limit(1)
+        )
+        if not has_history:
+            for op_type, prev_s, curr_s, op_uid, content, vis, ts in spec["history"]:
+                db.add(
+                    TicketStatusHistoryModel(
+                        ticket_id=tid,
+                        operator_user_id=op_uid,
+                        operation_type=op_type,
+                        content=content,
+                        previous_status=prev_s,
+                        current_status=curr_s,
+                        remark=content,
+                        visibility=vis,
+                        created_at=ts,
+                    )
+                )
+
+        for wo_spec in spec["work_orders"]:
+            wo_no = wo_spec["work_order_no"]
+            wo = db.scalar(select(WorkOrderModel).where(WorkOrderModel.work_order_no == wo_no))
+            if not wo:
+                if tid == "QTDEMO000000000001" and wo_spec["task_type"] == "primary":
+                    existing_primary = db.scalar(
+                        select(WorkOrderModel).where(
+                            WorkOrderModel.ticket_id == tid,
+                            WorkOrderModel.task_type == "primary",
+                            WorkOrderModel.status.in_(("pending", "processing", "submitted")),
+                        )
+                    )
+                    if existing_primary:
+                        wo = existing_primary
+                if not wo:
+                    wo = WorkOrderModel(
+                        id=_deterministic_uuid4(f"wo:{wo_no}"),
+                        work_order_no=wo_no,
+                        ticket_id=tid,
+                        task_type=wo_spec["task_type"],
+                        status=wo_spec["status"],
+                        department_id=wo_spec["department_id"],
+                        assignee_user_id=wo_spec.get("assignee_user_id"),
+                        instructions=wo_spec["instructions"],
+                        result_summary=wo_spec.get("result_summary"),
+                        result_measures=wo_spec.get("result_measures"),
+                        result_outcome=wo_spec.get("result_outcome"),
+                        public_content=wo_spec.get("public_content"),
+                        return_reason=wo_spec.get("return_reason"),
+                        created_by_user_id=wo_spec.get("created_by_user_id"),
+                        accepted_at=wo_spec.get("accepted_at"),
+                        submitted_at=wo_spec.get("submitted_at"),
+                        completed_at=wo_spec.get("completed_at"),
+                        created_at=wo_spec["history"][0][5] if wo_spec["history"] else spec["created_at"],
+                    )
+                    db.add(wo)
+                    db.flush()
+            has_wo_history = db.scalar(
+                select(WorkOrderHistoryModel.id)
+                .where(WorkOrderHistoryModel.work_order_id == wo.id)
+                .limit(1)
+            )
+            if not has_wo_history:
+                for action, prev_s, curr_s, op_uid, content, ts in wo_spec["history"]:
+                    db.add(
+                        WorkOrderHistoryModel(
+                            work_order_id=wo.id,
+                            operator_user_id=op_uid,
+                            action=action,
+                            previous_status=prev_s,
+                            current_status=curr_s,
+                            content=content,
+                            created_at=ts,
+                        )
+                    )
+    db.flush()
+    return tickets_by_id
+
+
+def _seed_demo_attachments(
+    db,
+    users: dict[str, UserModel],
+    department_ids: dict[str, int],
+    tickets_by_id: dict[str, TicketModel],
+    now: datetime,
+) -> int:
+    """Upload valid PDF/PNG demo attachments to MinIO and upsert clean DB records idempotently."""
+    try:
+        storage = storage_module.get_object_storage()
+    except Exception as exc:
+        logger.warning("Seed attachments skipped: object storage init failed: %s", exc)
+        return 0
+
+    try:
+        from minio.error import S3Error
+    except ImportError:
+        S3Error = None  # type: ignore[assignment]
+
+    road_pdf = _build_demo_pdf_bytes(
+        "CivicEcho Evidence - Road Damage Report",
+        [
+            "Ticket ID: QT2026110000000004",
+            "Location: Renmin West Rd #88 Bus Stop Bike Lane",
+            "Category: Municipal Road Surface Settlement",
+            "Status: Citizen Uploaded Evidence (Seed Verified)",
+        ],
+    )
+    site_png = _build_demo_png_bytes()
+    power_pdf = _build_demo_pdf_bytes(
+        "CivicEcho Official Inspection - Power Repair",
+        [
+            "Ticket ID: QT2026110000000010",
+            "Location: Xuefu Alley #14 Unit 2 Corridor Panel",
+            "Action: Replaced 32A RCD Breaker and Moisture Terminals",
+            "Result: Corridor Lighting Restored - Ready for Review",
+        ],
+    )
+
+    attachment_specs = [
+        {
+            "key": "att-0004-road-pdf",
+            "ticket_id": "QT2026110000000004",
+            "uploader_user_id": users["citizen_local"].id,
+            "uploader_role": "citizen",
+            "uploader_department_id": None,
+            "attachment_type": "citizen_material",
+            "visibility": "public",
+            "original_filename": "路面破损现场测量说明.pdf",
+            "content_type": "application/pdf",
+            "payload": road_pdf,
+        },
+        {
+            "key": "att-0008-site-png",
+            "ticket_id": "QT2026110000000008",
+            "uploader_user_id": users["citizen_local"].id,
+            "uploader_role": "citizen",
+            "uploader_department_id": None,
+            "attachment_type": "site_photo",
+            "visibility": "public",
+            "original_filename": "滨河小区垃圾转运点现场照片.png",
+            "content_type": "image/png",
+            "payload": site_png,
+        },
+        {
+            "key": "att-0010-official-pdf",
+            "ticket_id": "QT2026110000000010",
+            "uploader_user_id": users["department_local"].id,
+            "uploader_role": "department_staff",
+            "uploader_department_id": department_ids["general-intake"],
+            "attachment_type": "official_document",
+            "visibility": "public",
+            "original_filename": "学府巷楼道供电抢修验收确认单.pdf",
+            "content_type": "application/pdf",
+            "payload": power_pdf,
+        },
+    ]
+
+    persisted = 0
+    for spec in attachment_specs:
+        tid = spec["ticket_id"]
+        if tid not in tickets_by_id:
+            continue
+        att_id = _deterministic_uuid4(spec["key"])
+        object_key = f"tickets/{tid}/{att_id}"
+        payload = spec["payload"]
+        size_bytes = len(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+
+        # Check object existence idempotently; skip DB insert if storage is unreachable.
+        needs_upload = False
+        try:
+            existing_size = storage.size(object_key)
+            if existing_size != size_bytes:
+                needs_upload = True
+        except AttributeError:
+            # In-memory test fakes without .size()
+            needs_upload = True
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if isinstance(exc, (KeyError, FileNotFoundError)) or (
+                S3Error is not None and isinstance(exc, S3Error) and code in {"NoSuchKey", "NoSuchBucket", "NotFound"}
+            ):
+                needs_upload = True
+            else:
+                logger.warning("Seed attachment skipped (%s unreachable): %s", object_key, exc)
+                continue
+
+        if needs_upload:
+            try:
+                storage.put(object_key, io.BytesIO(payload), size_bytes, spec["content_type"])
+            except Exception as exc:
+                logger.warning("Seed attachment upload failed (%s): %s", object_key, exc)
+                continue
+
+        existing = db.scalar(
+            select(TicketAttachmentModel).where(
+                or_(
+                    TicketAttachmentModel.id == att_id,
+                    TicketAttachmentModel.object_key == object_key,
+                )
+            )
+        )
+        if not existing:
+            db.add(
+                TicketAttachmentModel(
+                    id=att_id,
+                    ticket_id=tid,
+                    uploader_user_id=spec["uploader_user_id"],
+                    uploader_role=spec["uploader_role"],
+                    uploader_department_id=spec["uploader_department_id"],
+                    attachment_type=spec["attachment_type"],
+                    visibility=spec["visibility"],
+                    original_filename=spec["original_filename"],
+                    content_type=spec["content_type"],
+                    size_bytes=size_bytes,
+                    sha256=digest,
+                    storage_provider="s3",
+                    storage_bucket=storage.bucket,
+                    object_key=object_key,
+                    scan_status="clean",
+                    scan_engine="seed-verified",
+                    scan_detail="seed demo verified clean",
+                    scanned_at=now,
+                    is_deleted=False,
+                    created_at=tickets_by_id[tid].created_at + timedelta(minutes=10),
+                )
+            )
+        else:
+            existing.storage_bucket = storage.bucket
+            existing.size_bytes = size_bytes
+            existing.sha256 = digest
+            existing.scan_status = "clean"
+            existing.scan_engine = "seed-verified"
+            existing.scan_detail = "seed demo verified clean"
+            existing.scanned_at = existing.scanned_at or now
+            existing.is_deleted = False
+        persisted += 1
+    db.flush()
+    return persisted
+
+
+def _seed_demo_ai_suggestions(
+    db,
+    users: dict[str, UserModel],
+    department_ids: dict[str, int],
+    tickets_by_id: dict[str, TicketModel],
+    now: datetime,
+) -> int:
+    """Seed schema-validated triage_assistant and handling_assistant suggestions (advisory_only=True)."""
+    agent_id = users["agent_local"].id
+    dept_user_id = users["department_local"].id
+
+    def _triage_payload(ticket: TicketModel, dept_name: str, dept_code: str, category_label: str) -> dict:
+        raw = {
+            "case_summary": {
+                "description": ticket.description,
+                "location": ticket.location,
+                "duration": ticket.occurred_at_text or "近期发生",
+                "affected_scope": "周边居民及通行群众",
+            },
+            "classification": {
+                "request_type": ticket.request_type,
+                "category": "城市管理",
+                "subcategory": category_label,
+                "reason": f"诉求明确涉及{category_label}，建议归类至对应末级分类。",
+            },
+            "urgency": {
+                "level": ticket.priority,
+                "emergency": ticket.priority in {"urgent", "major"},
+                "reason": "结合诉求对公共安全与日常通行的影响程度给出分诊建议。",
+            },
+            "completeness": {
+                "complete": not ticket.needs_supplement,
+                "known_fields": ["诉求描述", "具体地点", "发生时间", "联系方式"],
+                "missing_fields": [],
+                "follow_up_questions": [],
+                "completeness_score": 92,
+            },
+            "department_candidates": [
+                {
+                    "department_id": department_ids.get(dept_code),
+                    "department_name": dept_name,
+                    "recommendation_level": "high",
+                    "reason": f"历史同类{category_label}工单主要由{dept_name}牵头承办。",
+                    "historical_cases": 12,
+                    "score": 0.91,
+                },
+                {
+                    "department_id": department_ids.get("general-intake"),
+                    "department_name": "综合受理",
+                    "recommendation_level": "medium",
+                    "reason": "若涉及跨区权属边界，可由综合受理统筹协办。",
+                    "historical_cases": 5,
+                    "score": 0.56,
+                },
+            ],
+            "sla_recommendation": {
+                "response_deadline": "2 小时内完成受理分派",
+                "handling_deadline": "24-48 小时内完成现场核查处置",
+                "reason": "按市政分类默认 SLA 时限及优先等级建议。",
+            },
+            "intake_notice_draft": "您的诉求已收悉，我平台将结合核查情况尽快分派相关责任部门处理，结果仅供人工受理参考。",
+            "advisory_only": True,
+            "capability": "triage_assistant",
+            "confidence_labels": {"classification": 91, "department": 89, "urgency": 86},
+            "confidence": 89,
+        }
+        checked = validate_triage_response(raw)
+        if not checked.ok or not checked.data:
+            raise RuntimeError(f"Seed triage suggestion failed schema check: {checked.detail}")
+        return checked.data
+
+    def _handling_payload(ticket: TicketModel, dept_name: str, category_label: str) -> dict:
+        raw = {
+            "case_summary": {
+                "description": ticket.description,
+                "assigned_department": dept_name,
+                "classification": category_label,
+                "known_facts": [ticket.location, ticket.occurred_at_text or "待现场核验"],
+            },
+            "verification_checklist": [
+                "核实市民描述的具体点位与设施权属",
+                "查验现场安全隐患并留存处置前影像",
+                "核对同类事件历史办结口径与时限要求",
+            ],
+            "handling_plan": [
+                "安排一线核查人员到场踏勘并登记台账",
+                "明确主责及协办单位处置时间节点",
+                "处置完成后补充前后对比影像再拟定答复",
+            ],
+            "policy_references": ["《城市公共设施管护与便民热线办理规范》"],
+            "risk_warnings": ["临近 SLA 时限请优先核查留痕", "未核验现场前不得做出办结承诺"],
+            "missing_handling_facts": ["现场核查实拍记录", "具体修复或协调时间节点"],
+            "collaboration_suggestions": ["如遇跨部门权属界面不清，可发起协办核验任务"],
+            "evidence_checklist": ["现场位置照", "核查处理台账", "整改前后对比照"],
+            "reply_template": "经现场核查，该点位位于【位置】，责任权属为【权属单位】，工作人员于【处理时间】采取【处理措施】，目前【处理状态】。",
+            "reply_draft": "经现场核查，该点位位于【位置】，责任权属为【权属单位】，工作人员于【处理时间】采取【处理措施】，目前【处理状态】。",
+            "facts_sufficient": False,
+            "advisory_only": True,
+            "capability": "handling_assistant",
+            "confidence": 85,
+        }
+        checked = validate_handling_response(raw, facts_sufficient=False)
+        if not checked.ok or not checked.data:
+            raise RuntimeError(f"Seed handling suggestion failed schema check: {checked.detail}")
+        return checked.data
+
+    specs = [
+        {
+            "ticket_id": "QT2026110000000002",
+            "suggestion_type": "triage_assistant",
+            "risk_level": "attention",
+            "confidence": 89,
+            "generated_by": agent_id,
+            "reviewed_by": None,
+            "review_decision": None,
+            "review_comment": None,
+            "reviewed_at": None,
+            "payload": _triage_payload(tickets_by_id["QT2026110000000002"], "城市管理", "urban-management", "路灯故障"),
+        },
+        {
+            "ticket_id": "QT2026110000000004",
+            "suggestion_type": "triage_assistant",
+            "risk_level": "attention",
+            "confidence": 91,
+            "generated_by": agent_id,
+            "reviewed_by": agent_id,
+            "review_decision": "adopted_with_edits",
+            "review_comment": "采纳道路养护分派建议，并将优先级由普通上调为加急。",
+            "reviewed_at": tickets_by_id["QT2026110000000004"].accepted_at,
+            "payload": _triage_payload(tickets_by_id["QT2026110000000004"], "城市管理", "urban-management", "道路破损"),
+        },
+        {
+            "ticket_id": "QT2026110000000007",
+            "suggestion_type": "triage_assistant",
+            "risk_level": "none",
+            "confidence": 88,
+            "generated_by": agent_id,
+            "reviewed_by": agent_id,
+            "review_decision": "helpful",
+            "review_comment": "部门推荐和公交接驳要素提取准确。",
+            "reviewed_at": tickets_by_id["QT2026110000000007"].accepted_at,
+            "payload": _triage_payload(tickets_by_id["QT2026110000000007"], "交通运输", "transport", "公交接驳建议"),
+        },
+        {
+            "ticket_id": "QTDEMO000000000001",
+            "suggestion_type": "handling_assistant",
+            "risk_level": "none",
+            "confidence": 86,
+            "generated_by": dept_user_id,
+            "reviewed_by": dept_user_id,
+            "review_decision": "adopted",
+            "review_comment": "已采纳核查清单与便民服务时段答复结构。",
+            "reviewed_at": tickets_by_id["QTDEMO000000000001"].accepted_at + timedelta(minutes=30),
+            "payload": _handling_payload(tickets_by_id["QTDEMO000000000001"], "综合受理", "社区公共服务咨询"),
+        },
+        {
+            "ticket_id": "QT2026110000000006",
+            "suggestion_type": "handling_assistant",
+            "risk_level": "attention",
+            "confidence": 84,
+            "generated_by": dept_user_id,
+            "reviewed_by": None,
+            "review_decision": None,
+            "review_comment": None,
+            "reviewed_at": None,
+            "payload": _handling_payload(tickets_by_id["QT2026110000000006"], "综合受理", "供水停水"),
+        },
+        {
+            "ticket_id": "QT2026110000000008",
+            "suggestion_type": "handling_assistant",
+            "risk_level": "urgent",
+            "confidence": 82,
+            "generated_by": dept_user_id,
+            "reviewed_by": dept_user_id,
+            "review_decision": "rejected",
+            "review_comment": "现场渗滤液溢流需立即启动跨部门联合清运，已采用升级应急处置流程。",
+            "reviewed_at": tickets_by_id["QT2026110000000008"].accepted_at + timedelta(hours=2),
+            "payload": _handling_payload(tickets_by_id["QT2026110000000008"], "城市管理", "垃圾清运"),
+        },
+    ]
+
+    for spec in specs:
+        tid = spec["ticket_id"]
+        stype = spec["suggestion_type"]
+        sug_id = _deterministic_uuid4(f"ai:{tid}:{stype}")
+        fingerprint = hashlib.sha256(f"seed-ai:{tid}:{stype}:v1".encode("utf-8")).hexdigest()
+        existing = db.scalar(
+            select(AiSuggestionModel).where(
+                or_(
+                    AiSuggestionModel.id == sug_id,
+                    (AiSuggestionModel.ticket_id == tid)
+                    & (AiSuggestionModel.suggestion_type == stype)
+                    & (AiSuggestionModel.input_fingerprint == fingerprint),
+                )
+            )
+        )
+        if not existing:
+            db.add(
+                AiSuggestionModel(
+                    id=sug_id,
+                    ticket_id=tid,
+                    suggestion_type=stype,
+                    status="completed",
+                    risk_level=spec["risk_level"],
+                    confidence=spec["confidence"],
+                    provider="rules",
+                    model_name="phase6-rules-v1",
+                    input_fingerprint=fingerprint,
+                    result_json=json.dumps(spec["payload"], ensure_ascii=False),
+                    explanation=f"由演示规则引擎预置（capability={stype}，advisory_only=true），仅供人工参考。",
+                    generated_by_user_id=spec["generated_by"],
+                    reviewed_by_user_id=spec["reviewed_by"],
+                    review_decision=spec["review_decision"],
+                    review_comment=spec["review_comment"],
+                    reviewed_at=spec["reviewed_at"],
+                    created_at=tickets_by_id[tid].created_at + timedelta(minutes=15),
+                )
+            )
+    db.flush()
+    return len(specs)
+
+
+def _seed_demo_aftercare(
+    db,
+    users: dict[str, UserModel],
+    tickets_by_id: dict[str, TicketModel],
+    now: datetime,
+) -> dict[str, int]:
+    """Seed feedbacks, follow-up tasks, phone follow-up records, and appeals idempotently."""
+    citizen_id = users["citizen_local"].id
+    agent_id = users["agent_local"].id
+    admin_id = users["admin_local"].id
+
+    # 1. Ticket feedbacks
+    feedback_specs = [
+        (
+            "QT2026110000000014",
+            1,
+            "dissatisfied",
+            "dissatisfied_recorded",
+            "垃圾清运频次仍偏低，晚间助餐点周边仍有异味，希望进一步整改。",
+            tickets_by_id["QT2026110000000014"].resolved_at + timedelta(hours=10),
+        ),
+        (
+            "QT2026110000000015",
+            1,
+            "satisfied",
+            "closed",
+            "青云路路灯当晚即恢复亮灯，抢修响应迅速。",
+            tickets_by_id["QT2026110000000015"].closed_at,
+        ),
+        (
+            "QT2026110000000017",
+            2,
+            "mostly_satisfied",
+            "closed",
+            "二次整改后社区无障碍坡道坡度合理、防滑效果好。",
+            tickets_by_id["QT2026110000000017"].closed_at,
+        ),
+    ]
+    for tid, res_ver, rating, result, comment, ts in feedback_specs:
+        stmt = pg_insert(TicketFeedbackModel).values(
+            ticket_id=tid,
+            citizen_user_id=citizen_id,
+            resolution_version=res_ver,
+            rating=rating,
+            comment=comment,
+            result=result,
+            created_at=ts,
+        ).on_conflict_do_nothing(index_elements=["ticket_id", "resolution_version"])
+        db.execute(stmt)
+
+    # 2. Follow-up tasks
+    followup_specs = [
+        {
+            "ticket_id": "QT2026110000000013",
+            "handling_round": 1,
+            "status": "pending",
+            "assigned_user_id": agent_id,
+            "due_at": now + timedelta(hours=24),
+            "completed_at": None,
+            "created_at": tickets_by_id["QT2026110000000013"].resolved_at,
+        },
+        {
+            "ticket_id": "QT2026110000000014",
+            "handling_round": 1,
+            "status": "in_progress",
+            "assigned_user_id": agent_id,
+            "due_at": now + timedelta(hours=12),
+            "completed_at": None,
+            "created_at": tickets_by_id["QT2026110000000014"].resolved_at,
+        },
+        {
+            "ticket_id": "QT2026110000000015",
+            "handling_round": 1,
+            "status": "cancelled",
+            "assigned_user_id": agent_id,
+            "due_at": tickets_by_id["QT2026110000000015"].resolved_at + timedelta(hours=48),
+            "completed_at": tickets_by_id["QT2026110000000015"].closed_at,
+            "created_at": tickets_by_id["QT2026110000000015"].resolved_at,
+        },
+        {
+            "ticket_id": "QT2026110000000016",
+            "handling_round": 1,
+            "status": "completed",
+            "assigned_user_id": agent_id,
+            "due_at": tickets_by_id["QT2026110000000016"].resolved_at + timedelta(hours=48),
+            "completed_at": tickets_by_id["QT2026110000000016"].closed_at,
+            "created_at": tickets_by_id["QT2026110000000016"].resolved_at,
+        },
+    ]
+    task_ids_by_ticket: dict[str, str] = {}
+    for spec in followup_specs:
+        tid = spec["ticket_id"]
+        h_round = spec["handling_round"]
+        task_id = _deterministic_uuid4(f"followup:{tid}:r{h_round}")
+        existing_task = db.scalar(
+            select(FollowUpTaskModel).where(
+                FollowUpTaskModel.ticket_id == tid,
+                FollowUpTaskModel.handling_round == h_round,
+            )
+        )
+        if not existing_task:
+            existing_task = FollowUpTaskModel(
+                id=task_id,
+                ticket_id=tid,
+                handling_round=h_round,
+                status=spec["status"],
+                assigned_user_id=spec["assigned_user_id"],
+                due_at=spec["due_at"],
+                completed_at=spec["completed_at"],
+                created_at=spec["created_at"],
+            )
+            db.add(existing_task)
+            db.flush()
+        task_ids_by_ticket[tid] = existing_task.id
+
+    # 3. Phone follow-up records
+    call_specs = [
+        {
+            "key": "call-14-1",
+            "ticket_id": "QT2026110000000014",
+            "contact_result": "no_answer",
+            "satisfaction": None,
+            "outcome": "needs_followup",
+            "notes": "首次电话回访无人接听，已登记次日工作时段再次致电跟进。",
+            "created_at": tickets_by_id["QT2026110000000014"].resolved_at + timedelta(hours=16),
+        },
+        {
+            "key": "call-16-1",
+            "ticket_id": "QT2026110000000016",
+            "contact_result": "reached",
+            "satisfaction": "satisfied",
+            "outcome": "confirmed",
+            "notes": "电话回访来电人对公交候车亭顶棚及盲道修缮结果表示满意，确认办结。",
+            "created_at": tickets_by_id["QT2026110000000016"].closed_at,
+        },
+    ]
+    for spec in call_specs:
+        tid = spec["ticket_id"]
+        rec_id = _deterministic_uuid4(spec["key"])
+        if not db.get(PhoneFollowUpRecordModel, rec_id):
+            db.add(
+                PhoneFollowUpRecordModel(
+                    id=rec_id,
+                    task_id=task_ids_by_ticket[tid],
+                    ticket_id=tid,
+                    caller_user_id=agent_id,
+                    contact_result=spec["contact_result"],
+                    satisfaction=spec["satisfaction"],
+                    outcome=spec["outcome"],
+                    notes=spec["notes"],
+                    created_at=spec["created_at"],
+                )
+            )
+
+    # 4. Appeals (submitted / reprocessing / completed / rejected)
+    appeal_specs = [
+        {
+            "ticket_id": "QT2026110000000014",
+            "sequence": 1,
+            "appeal_no": "QT2026110000000014-SS-1",
+            "status": "submitted",
+            "reason": "助餐点垃圾桶虽已挪位，但晚间高峰仍存在清运滞后与异味问题。",
+            "desired_resolution": "希望增加每日晚间 20:30 固定清运班次并公示负责人。",
+            "review_comment": None,
+            "reviewed_by_user_id": None,
+            "reviewed_at": None,
+            "reprocess_instructions": None,
+            "result_summary": None,
+            "completed_at": None,
+            "created_at": tickets_by_id["QT2026110000000014"].resolved_at + timedelta(hours=12),
+        },
+        {
+            "ticket_id": "QT2026110000000012",
+            "sequence": 1,
+            "appeal_no": "QT2026110000000012-SS-1",
+            "status": "reprocessing",
+            "reason": "北门东侧转角灌木仍高于 1.2 米，早高峰接送学生存在视野遮挡。",
+            "desired_resolution": "请补充对东侧转角灌木做低矮化修剪并联合复核。",
+            "review_comment": "申诉情况属实，同意进入第 2 轮重新办理并加派综合受理复核。",
+            "reviewed_by_user_id": admin_id,
+            "reviewed_at": now - timedelta(days=1),
+            "reprocess_instructions": "请教育部门会同园林养护完成转角灌木降高修剪，由综合受理复核现场视野。",
+            "result_summary": None,
+            "completed_at": None,
+            "created_at": tickets_by_id["QT2026110000000012"].created_at + timedelta(days=3),
+        },
+        {
+            "ticket_id": "QT2026110000000017",
+            "sequence": 1,
+            "appeal_no": "QT2026110000000017-SS-1",
+            "status": "completed",
+            "reason": "原坡道坡度过陡且雨天易打滑，老年人轮椅通行困难。",
+            "desired_resolution": "要求按无障碍设计标准放缓坡度并增设防滑条和扶手。",
+            "review_comment": "同意复核并重新派发社区民政二次整改。",
+            "reviewed_by_user_id": admin_id,
+            "reviewed_at": tickets_by_id["QT2026110000000017"].created_at + timedelta(hours=26),
+            "reprocess_instructions": "按 1:12 坡度标准改造坡道并安装双侧扶手，验收照片归档。",
+            "result_summary": "已完成坡道扩坡、防滑条铺设及双侧不锈钢扶手安装，现场复验合格。",
+            "completed_at": tickets_by_id["QT2026110000000017"].resolved_at,
+            "created_at": tickets_by_id["QT2026110000000017"].created_at + timedelta(hours=24),
+        },
+        {
+            "ticket_id": "QT2026110000000015",
+            "sequence": 1,
+            "appeal_no": "QT2026110000000015-SS-1",
+            "status": "rejected",
+            "reason": "希望追加安装路灯夜间亮度可调控制模块。",
+            "desired_resolution": "建议将普通路段路灯全线升级为智能调光灯头。",
+            "review_comment": "经复核本工单报修故障已彻底修复且照度符合现行市政标准，智能升级建议请另行提交。",
+            "reviewed_by_user_id": admin_id,
+            "reviewed_at": tickets_by_id["QT2026110000000015"].closed_at - timedelta(hours=1),
+            "reprocess_instructions": None,
+            "result_summary": None,
+            "completed_at": tickets_by_id["QT2026110000000015"].closed_at - timedelta(hours=1),
+            "created_at": tickets_by_id["QT2026110000000015"].resolved_at + timedelta(hours=2),
+        },
+    ]
+    for spec in appeal_specs:
+        tid = spec["ticket_id"]
+        seq = spec["sequence"]
+        appeal_id = _deterministic_uuid4(f"appeal:{tid}:s{seq}")
+        stmt = pg_insert(AppealModel).values(
+            id=appeal_id,
+            appeal_no=spec["appeal_no"],
+            ticket_id=tid,
+            citizen_user_id=citizen_id,
+            sequence=seq,
+            status=spec["status"],
+            reason=spec["reason"],
+            desired_resolution=spec["desired_resolution"],
+            review_comment=spec["review_comment"],
+            reviewed_by_user_id=spec["reviewed_by_user_id"],
+            reviewed_at=spec["reviewed_at"],
+            reprocess_instructions=spec["reprocess_instructions"],
+            result_summary=spec["result_summary"],
+            completed_at=spec["completed_at"],
+            created_at=spec["created_at"],
+        ).on_conflict_do_nothing(index_elements=["ticket_id", "sequence"])
+        db.execute(stmt)
+    db.flush()
+    return {"follow_up_tasks": len(followup_specs), "appeals": len(appeal_specs)}
+
+
+def _seed_demo_notifications(
+    db,
+    users: dict[str, UserModel],
+    tickets_by_id: dict[str, TicketModel],
+    now: datetime,
+) -> int:
+    """Seed unread and read notifications across all 4 demo roles idempotently."""
+    specs = [
+        # citizen_local
+        ("citizen_local", "QT2026110000000003", "supplement_required", "unread", "需要补充材料",
+         "工单 QT2026110000000003 需要补充材料：请补充具体路口方位参照物及井盖编号。", None, now - timedelta(minutes=50)),
+        ("citizen_local", "QT2026110000000013", "awaiting_confirmation", "unread", "等待市民确认",
+         "请查看工单 QT2026110000000013 的办理结果并确认或提出申诉。", None, now - timedelta(hours=6)),
+        ("citizen_local", "QT2026110000000015", "ticket_closed", "read", "工单已办结",
+         "工单 QT2026110000000015 已办结，感谢您的参与。", now - timedelta(days=2), now - timedelta(days=10)),
+        # agent_local
+        ("agent_local", "QT2026110000000003", "ticket_due_soon", "unread", "工单即将超时",
+         "工单 QT2026110000000003 临近当前受理时限，请及时跟进。", None, now - timedelta(minutes=30)),
+        ("agent_local", "QT2026110000000002", "ticket_created", "unread", "工单创建成功",
+         "市民新提交诉求，工单号为 QT2026110000000002，请尽快核验受理。", None, now - timedelta(minutes=20)),
+        ("agent_local", "QT2026110000000004", "ticket_accepted", "read", "工单已受理",
+         "工单 QT2026110000000004 已受理，正在安排派发承办。", now - timedelta(hours=12), now - timedelta(days=1)),
+        # department_local
+        ("department_local", "QT2026110000000006", "ticket_assigned", "unread", "工单已派发",
+         "工单 QT2026110000000006 已派发至综合受理部门，请及时签收办理。", None, now - timedelta(hours=16)),
+        ("department_local", "QT2026110000000010", "ticket_due_soon", "unread", "工单即将超时",
+         "工单 QT2026110000000010 临近办理时限，请关注复核进度。", None, now - timedelta(minutes=45)),
+        ("department_local", "QT2026110000000008", "ticket_overdue", "unread", "工单已超时",
+         "工单 QT2026110000000008 协办任务已超过办理时限，请立即处理。", None, now - timedelta(hours=4)),
+        ("department_local", "QT2026110000000012", "appeal_approved", "read", "申诉审核通过",
+         "工单 QT2026110000000012 的申诉已通过审核，已加派复核协办任务。", now - timedelta(hours=10), now - timedelta(hours=18)),
+        # admin_local
+        ("admin_local", "QT2026110000000008", "ticket_overdue", "unread", "工单已超时",
+         "工单 QT2026110000000008 已超过办理时限，请立即督办。", None, now - timedelta(hours=5)),
+        ("admin_local", "QT2026110000000014", "appeal_submitted", "unread", "收到市民申诉",
+         "工单 QT2026110000000014 有新的市民申诉，请审核处理。", None, now - timedelta(hours=8)),
+        ("admin_local", "QT2026110000000017", "appeal_completed", "read", "申诉处理完成",
+         "工单 QT2026110000000017 的重新办理结果已出具并归档。", now - timedelta(days=3), now - timedelta(days=11)),
+    ]
+
+    for username, tid, event_type, status, title, content, read_at, created_at in specs:
+        if tid not in tickets_by_id:
+            continue
+        user_id = users[username].id
+        event_key = f"seed:{event_type}:{tid}:{username}:{status}"
+        notif_id = _deterministic_uuid4(f"notif:{event_key}")
+        stmt = pg_insert(NotificationModel).values(
+            id=notif_id,
+            recipient_user_id=user_id,
+            ticket_id=tid,
+            event_type=event_type,
+            channel="in_app",
+            title=title,
+            content=content,
+            status=status,
+            delivery_status="delivered",
+            event_key=event_key,
+            metadata_json=json.dumps({"ticket_id": tid, "seed": True}, ensure_ascii=False),
+            read_at=read_at,
+            created_at=created_at,
+        ).on_conflict_do_nothing(index_elements=["event_key"])
+        db.execute(stmt)
+    db.flush()
+    return len(specs)
+
+
+def _seed_demo_audit_logs(
+    db,
+    users: dict[str, UserModel],
+    tickets_by_id: dict[str, TicketModel],
+    now: datetime,
+) -> int:
+    """Seed deterministic, idempotent audit logs across key lifecycle actions."""
+    citizen_id = users["citizen_local"].id
+    agent_id = users["agent_local"].id
+    dept_user_id = users["department_local"].id
+    admin_id = users["admin_local"].id
+
+    existing_rids = set(
+        db.scalars(
+            select(AuditLogModel.request_id).where(AuditLogModel.request_id.like("seed-audit-%"))
+        ).all()
+    )
+    has_legacy_seed_demo = db.scalar(
+        select(AuditLogModel.id)
+        .where(
+            AuditLogModel.action == "seed_demo",
+            AuditLogModel.resource_id == "QTDEMO000000000001",
+            AuditLogModel.request_id == "seed-command",
+        )
+        .limit(1)
+    )
+
+    entries = [
+        ("seed-audit-0001-demo", admin_id, "seed_demo", "ticket", "QTDEMO000000000001",
+         '{"profile":"demo"}', tickets_by_id["QTDEMO000000000001"].created_at),
+        ("seed-audit-0002-create", citizen_id, "create_ticket", "ticket", "QT2026110000000002",
+         '{"request_type":"投诉"}', tickets_by_id["QT2026110000000002"].created_at),
+        ("seed-audit-0004-accept", agent_id, "accept_ticket", "ticket", "QT2026110000000004",
+         '{"priority":"expedited"}', tickets_by_id["QT2026110000000004"].accepted_at),
+        ("seed-audit-0004-attach", citizen_id, "upload_attachment", "attachment", "QT2026110000000004",
+         '{"content_type":"application/pdf","scan_status":"clean"}', tickets_by_id["QT2026110000000004"].created_at + timedelta(minutes=10)),
+        ("seed-audit-0004-ai", agent_id, "review_ai_suggestion_adoption", "ai_suggestion", "QT2026110000000004",
+         '{"decision":"adopted_with_edits","advisory_only":true}', tickets_by_id["QT2026110000000004"].accepted_at),
+        ("seed-audit-0006-assign", agent_id, "assign_ticket", "ticket", "QT2026110000000006",
+         '{"department":"general-intake"}', tickets_by_id["QT2026110000000006"].accepted_at + timedelta(minutes=15)),
+        ("seed-audit-0010-review", dept_user_id, "submit_for_review", "ticket", "QT2026110000000010",
+         '{"collaboration_status":"awaiting_review"}', now - timedelta(hours=4)),
+        ("seed-audit-0011-pause", agent_id, "pause_ticket_sla", "ticket", "QT2026110000000011",
+         '{"reason":"等待停电窗口"}', now - timedelta(hours=2)),
+        ("seed-audit-0012-appeal", admin_id, "review_appeal", "appeal", "QT2026110000000012-SS-1",
+         '{"decision":"approved","handling_round":2}', now - timedelta(days=1)),
+        ("seed-audit-0013-resolve", agent_id, "review_and_resolve", "ticket", "QT2026110000000013",
+         '{"outcome":"resolved"}', tickets_by_id["QT2026110000000013"].resolved_at),
+        ("seed-audit-0016-call", agent_id, "record_phone_follow_up", "ticket", "QT2026110000000016",
+         '{"contact_result":"reached","outcome":"confirmed"}', tickets_by_id["QT2026110000000016"].closed_at),
+        ("seed-audit-0018-reject", agent_id, "reject_ticket", "ticket", "QT2026110000000018",
+         '{"rejection_reason_code":"out_of_jurisdiction"}', tickets_by_id["QT2026110000000018"].created_at + timedelta(minutes=35)),
+    ]
+
+    inserted = 0
+    for rid, actor_id, action, rtype, r_id, details, ts in entries:
+        if rid == "seed-audit-0001-demo" and has_legacy_seed_demo:
+            continue
+        if rid in existing_rids:
+            continue
+        db.add(
+            AuditLogModel(
+                actor_user_id=actor_id,
+                actor_type="user",
+                action=action,
+                resource_type=rtype,
+                resource_id=r_id,
+                outcome="success",
+                details=details,
+                request_id=rid,
+                created_at=ts,
+            )
+        )
+        inserted += 1
+    db.flush()
+    return inserted
 
 
 def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[str, int]:
@@ -1145,7 +3099,6 @@ def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[
     logger = logging.getLogger(__name__)
     now = datetime.now(timezone.utc)
     admin_user_id = users["admin_local"].id
-    dept_user_id = users["department_local"].id
     doc_ids: dict[str, int] = {}
 
     # Build a map of existing seed-keyed docs (meta_json.seed_key)
@@ -1253,10 +3206,6 @@ def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[
             kind="user", user_id=admin_user_id, username="admin_local",
             role="admin", department_id=None,
         )
-        dept_principal = Principal(
-            kind="user", user_id=dept_user_id, username="department_local",
-            role="department_staff", department_id=department_ids.get("general-intake"),
-        )
         # Use a principal that matches the doc's department so visibility filter allows indexing.
         for key, doc_id in doc_ids.items():
             doc = db.get(KbDocumentModel, doc_id)
@@ -1306,7 +3255,6 @@ def _seed_kb_documents(db, users: dict, department_ids: dict[str, int]) -> dict[
 def _seed_kb_eval_cases(db, kb_doc_ids_by_key: dict[str, int]) -> int:
     """Seed RAG evaluation cases keyed by seed_key stored in notes prefix.
     Returns the number of evaluation cases seeded."""
-    import json as _json
 
     # Use a dedicated marker prefix in notes for idempotency
     MARKER = "[seed:"
@@ -1362,7 +3310,9 @@ def _seed_kb_eval_cases(db, kb_doc_ids_by_key: dict[str, int]) -> int:
             case.is_active = True
         count += 1
     db.flush()
-    return count
+    from scripts.rag_evaluate import load_golden
+
+    return count + load_golden(db, kb_doc_ids_by_key)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,12 @@ class AdminService:
         role = payload.role if payload.role is not None else user.role
         department_id = payload.department_id if "department_id" in payload.model_fields_set else user.department_id
         self._validate_department(role, department_id)
+        should_revoke = (
+            bool(payload.password)
+            or (payload.role is not None and payload.role != user.role)
+            or ("department_id" in payload.model_fields_set and payload.department_id != user.department_id)
+            or (payload.is_active is False and user.is_active)
+        )
         for field in ("display_name", "role", "is_active"):
             value = getattr(payload, field)
             if value is not None:
@@ -51,6 +57,8 @@ class AdminService:
             user.department_id = payload.department_id
         if payload.password:
             user.password_hash = hash_password(payload.password)
+        if should_revoke:
+            user.token_version = int(getattr(user, "token_version", 1) or 1) + 1
         user = self.users.save(user)
         self.audit.log(principal, "update_user", resource_type="user", resource_id=str(user.id))
         return user

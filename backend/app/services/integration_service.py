@@ -111,7 +111,10 @@ class IntegrationService:
         if not user.is_active:
             raise PermissionDenied("账号已停用")
         self.audit.log(Principal("user", user.id, user.username, user.role, user.department_id), "oidc_login", resource_type="user", resource_id=str(user.id))
-        return TokenResponse(access_token=create_access_token(user.id, user.role), expires_in=self.settings.jwt_access_token_minutes * 60)
+        return TokenResponse(
+            access_token=create_access_token(user.id, user.role, token_version=user.token_version or 1),
+            expires_in=self.settings.jwt_access_token_minutes * 60,
+        )
 
     def sync_directory(self, principal: Principal):
         self._admin(principal)

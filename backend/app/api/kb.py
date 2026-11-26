@@ -9,19 +9,30 @@
 - 部门人员 department_staff：可上传/管理本部门文档、提交审核、查询反馈、调用 AI 办件助手
 - 管理员 admin：全部能力 + 直发/审核/下线/失效/重建索引/无答案处理/评测管理
 """
+import asyncio
+import inspect
+import logging
+import uuid
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from ..authorization import Principal
 from ..database import get_db
+from ..logging_config import request_id_context
+from ..model_governance import model_caller
 from ..schemas import SuccessResponse
 from ..services.kb_service import KnowledgeBaseService
-from .dependencies import get_current_principal, get_user_principal
+from .dependencies import get_user_principal, require_ai_rate_limit, require_upload_rate_limit
+from .notifications import _format_sse
+
+logger = logging.getLogger(__name__)
+_STREAM_DONE = object()
 
 router = APIRouter(prefix="/api/v1/kb", tags=["knowledge-base"])
 
@@ -129,6 +140,8 @@ class EvalCaseCreateRequest(BaseModel):
 class EvalRunRequest(BaseModel):
     scenario: Optional[str] = Field(default=None, max_length=64)
     role: str = Field(default="citizen", pattern="^(citizen|agent|department_staff|admin)$")
+    golden_only: bool = False
+    case_ids: Optional[list[str]] = Field(default=None, max_length=200)
 
 
 # ============================================================================
@@ -223,6 +236,7 @@ def _chunk_to_dict(chunk) -> dict:
         "content": chunk.content,
         "char_count": chunk.char_count,
         "token_count": chunk.token_count,
+        "source_metadata": _json.loads(chunk.source_metadata or "{}"),
         "chunk_hash": chunk.chunk_hash,
         "keywords": keywords,
         "has_embedding": embedding_status in {"external", "hash_fallback"},
@@ -352,6 +366,7 @@ def upload_document(
     doc_id: Optional[int] = Form(None),
     auto_publish: bool = Form(False),
     principal: Principal = Depends(get_user_principal),
+    _: None = Depends(require_upload_rate_limit),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """Upload a file (PDF/Word/Markdown/Text) and create a new document or new version.
@@ -397,7 +412,7 @@ def list_documents(
     keyword: Optional[str] = Query(None, max_length=200),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_user_principal),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """List documents with role-based permission filter and pagination."""
@@ -418,7 +433,7 @@ def list_documents(
 @router.get("/documents/{doc_id}", response_model=SuccessResponse[dict])
 def get_document(
     doc_id: int,
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_user_principal),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """Get full document detail including metadata and file info."""
@@ -587,7 +602,8 @@ def download_document(
 @router.post("/query", response_model=SuccessResponse[dict])
 def rag_query(
     payload: RagQueryRequest,
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_user_principal),
+    _: None = Depends(require_ai_rate_limit),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """Full RAG pipeline: permission-filtered retrieval + LLM answer with citations."""
@@ -598,10 +614,119 @@ def rag_query(
     return SuccessResponse(data=result)
 
 
+@router.post("/query/stream")
+async def rag_query_stream(
+    payload: RagQueryRequest,
+    request: Request,
+    principal: Principal = Depends(get_user_principal),
+    _: None = Depends(require_ai_rate_limit),
+):
+    """Stream RAG answer as SSE (`meta` -> `delta` -> `done`)."""
+    caller_value = f"user:{principal.user_id}"
+    captured_request_id = request_id_context.get()
+    if not captured_request_id or captured_request_id == "-":
+        captured_request_id = uuid.uuid4().hex
+    db_provider = request.app.dependency_overrides.get(get_db, get_db)
+
+    async def event_generator():
+        db_gen = None
+        sync_gen = None
+        closed = False
+
+        def _open_stream():
+            nonlocal db_gen, sync_gen
+            raw_db = db_provider()
+            if inspect.isgenerator(raw_db):
+                db_gen = raw_db
+                db = next(db_gen)
+            else:
+                db = raw_db
+            service = KnowledgeBaseService(db)
+            caller_tok = model_caller.set(caller_value)
+            req_tok = request_id_context.set(captured_request_id)
+            try:
+                sync_gen = service.rag_answer_stream(
+                    payload.query,
+                    principal,
+                    region=payload.region,
+                    domain=payload.domain,
+                    audience=payload.audience,
+                    request_id=captured_request_id,
+                )
+            finally:
+                request_id_context.reset(req_tok)
+                model_caller.reset(caller_tok)
+
+        def _next_event():
+            caller_tok = model_caller.set(caller_value)
+            req_tok = request_id_context.set(captured_request_id)
+            try:
+                return next(sync_gen, _STREAM_DONE)
+            finally:
+                request_id_context.reset(req_tok)
+                model_caller.reset(caller_tok)
+
+        def _close_stream():
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            try:
+                if sync_gen is not None and hasattr(sync_gen, "close"):
+                    try:
+                        sync_gen.close()
+                    except Exception:
+                        pass
+            finally:
+                if db_gen is not None:
+                    try:
+                        db_gen.close()
+                    except Exception:
+                        pass
+
+        try:
+            await run_in_threadpool(_open_stream)
+            while True:
+                if await request.is_disconnected():
+                    break
+                item = await run_in_threadpool(_next_event)
+                if item is _STREAM_DONE:
+                    break
+                event_name, event_data = item
+                yield _format_sse(event_name, event_data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("KB RAG SSE stream error: %s", type(exc).__name__)
+            yield _format_sse(
+                "error",
+                {
+                    "code": "STREAM_ERROR",
+                    "message": "知识库流式问答暂时不可用，请重试。",
+                    "advisory_only": True,
+                },
+            )
+        finally:
+            try:
+                await run_in_threadpool(_close_stream)
+            except BaseException:
+                _close_stream()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/retrieve", response_model=SuccessResponse[dict])
 def retrieve_only(
     payload: RagQueryRequest,
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_user_principal),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """Retrieve-only endpoint (no LLM generation) for admin/agent debugging."""
@@ -620,7 +745,7 @@ def retrieve_only(
 @router.post("/feedback", response_model=SuccessResponse[dict])
 def submit_feedback(
     payload: FeedbackRequest,
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(get_user_principal),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """Submit feedback on a RAG answer (helpful/inaccurate/outdated/no_answer)."""
@@ -726,13 +851,20 @@ def run_eval(
     Returns per-case run results plus aggregate metrics:
     - retrieval_hit_rate: 命中率
     - citation_correct_rate: 引用准确率
-    - answer_faithful_rate: 忠实度
+    - fact_coverage_rate: 标注事实字符串覆盖率；不代表生成内容的忠实度
+    - answer_faithful_rate: 未自动评定，返回 null
     - expired_policy_blocked_rate: 失效政策拦截率
     - permission_isolated_rate: 权限隔离率
     - no_answer_rate: 无答案率
     - avg_latency_ms: 平均延迟
     """
-    result = service.run_eval(principal, scenario=payload.scenario, role=payload.role)
+    result = service.run_eval(
+        principal,
+        scenario=payload.scenario,
+        role=payload.role,
+        golden_only=payload.golden_only,
+        case_ids=payload.case_ids,
+    )
     return SuccessResponse(data=result)
 
 
@@ -744,6 +876,7 @@ def run_eval(
 def ticket_advice(
     ticket_id: str,
     principal: Principal = Depends(get_user_principal),
+    _: None = Depends(require_ai_rate_limit),
     service: KnowledgeBaseService = Depends(get_service),
 ):
     """RAG-powered department AI assistant for a work order ticket.
@@ -808,6 +941,7 @@ def ticket_advice_review(
     from ..errors import BusinessError, PermissionDenied, TicketNotFound
     from ..models import AiSuggestionModel
     from ..repositories.ai import AiRepository
+    from sqlalchemy import select
 
     valid_decisions = {"adopted", "adopted_with_edits", "rejected"}
     if payload.decision not in valid_decisions:
@@ -824,7 +958,9 @@ def ticket_advice_review(
     if principal.role not in {"department_staff", "agent", "admin"}:
         raise PermissionDenied("只有工作人员可以审核 AI 办件建议")
 
-    suggestion = service.db.get(AiSuggestionModel, payload.advice_id)
+    suggestion = service.db.scalar(select(AiSuggestionModel).where(
+        AiSuggestionModel.id == payload.advice_id
+    ).with_for_update())
     if (
         not suggestion
         or suggestion.suggestion_type != "ticket_advice"
@@ -849,24 +985,28 @@ def ticket_advice_review(
     suggestion.review_comment = payload.edit_summary
     suggestion.reviewed_by_user_id = principal.user_id
     suggestion.reviewed_at = operated_at
-    service.db.commit()
-
     operated_at_iso = operated_at.isoformat()
-    service.audit.log(
-        principal, "ai_advice_review",
-        resource_type="ticket", resource_id=ticket_id,
-        details={
-            "advice_id": payload.advice_id,
-            "decision": payload.decision,
-            "edit_summary": payload.edit_summary,
-            "advice_snapshot": snapshot,
-            "advice_snapshot_hash": snapshot_hash,
-            "operator_user_id": principal.user_id,
-            "operator_role": principal.role,
-            "operated_at": operated_at_iso,
-            "advisory_only": True,
-        },
-    )
+    try:
+        service.audit.log(
+            principal, "ai_advice_review",
+            resource_type="ticket", resource_id=ticket_id,
+            details={
+                "advice_id": payload.advice_id,
+                "decision": payload.decision,
+                "edit_summary": payload.edit_summary,
+                "advice_snapshot": snapshot,
+                "advice_snapshot_hash": snapshot_hash,
+                "operator_user_id": principal.user_id,
+                "operator_role": principal.role,
+                "operated_at": operated_at_iso,
+                "advisory_only": True,
+            },
+            commit=False,
+        )
+        service.db.commit()
+    except Exception:
+        service.db.rollback()
+        raise
     return SuccessResponse(data={
         "ticket_id": ticket_id,
         "advice_id": payload.advice_id,

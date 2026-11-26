@@ -1,12 +1,12 @@
 """Atomic KB index switch: keep live chunks until rebuild succeeds."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from sqlalchemy import select
 
-from app.authorization import Principal
 from app.database import SessionLocal
 from app.embedding_client import EmbeddingResult, EmbeddingUsage
 from app.models import KbChunkModel, KbDocumentModel
@@ -45,8 +45,8 @@ def _make_doc(db) -> KbDocumentModel:
     return doc
 
 
-def test_reindex_failure_keeps_old_live_chunks():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_reindex_failure_keeps_old_live_chunks(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         doc = _make_doc(db)
         doc_id = doc.id
@@ -100,8 +100,8 @@ def test_reindex_failure_keeps_old_live_chunks():
         assert other == []
 
 
-def test_reindex_success_switches_without_duplicate_chunks():
-    principal = Principal("user", 1, "admin_local", "admin", None)
+def test_reindex_success_switches_without_duplicate_chunks(persisted_kb_admin):
+    principal = persisted_kb_admin
     with SessionLocal() as db:
         doc = _make_doc(db)
         doc_id = doc.id
@@ -137,3 +137,25 @@ def test_reindex_success_switches_without_duplicate_chunks():
         assert len(all_chunks) == doc.chunk_count
         assert any("更新版正文" in c.content for c in all_chunks)
         assert not any("第一段" in c.content for c in all_chunks)
+
+
+def test_reindex_reclaims_expired_build_without_promoting_abandoned_chunks(persisted_kb_admin):
+    with SessionLocal() as db:
+        doc = _make_doc(db)
+        doc.index_status = "building"
+        doc.parse_status = "parsing"
+        doc.index_lease_token = "abandoned"
+        doc.index_lease_until = datetime.now(timezone.utc) - timedelta(seconds=5)
+        doc_id = doc.id
+        db.add(KbChunkModel(document_id=doc_id, chunk_index=0, content="abandoned", index_batch_id="abandoned"))
+        db.commit()
+
+        client = MagicMock()
+        client.embed_batch.side_effect = lambda chunks: [_embedding(fallback=True) for _ in chunks]
+        with patch("app.services.kb_service.get_embedding_client", return_value=client):
+            KnowledgeBaseService(db).reindex(doc_id, persisted_kb_admin)
+
+        assert doc.index_status == "ready"
+        assert doc.index_lease_token is None and doc.index_lease_until is None
+        chunks = db.scalars(select(KbChunkModel).where(KbChunkModel.document_id == doc_id)).all()
+        assert chunks and all(chunk.index_batch_id == doc.active_index_batch for chunk in chunks)

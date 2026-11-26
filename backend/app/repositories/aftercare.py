@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.dialects.postgresql import insert
 
 from ..authorization import Principal
 from ..models import AppealModel, FollowUpTaskModel, NotificationModel, PhoneFollowUpRecordModel, TicketModel, WorkOrderModel
@@ -14,13 +15,11 @@ class NotificationRepository:
     def add_missing(self, items: list[NotificationModel], *, commit: bool = True) -> None:
         if not items:
             return
-        keys = [item.event_key for item in items]
-        existing = set(self.db.scalars(select(NotificationModel.event_key).where(NotificationModel.event_key.in_(keys))).all())
-        self.db.add_all([item for item in items if item.event_key not in existing])
+        rows = [{column.name: getattr(item, column.name) for column in NotificationModel.__table__.columns
+                 if column.name not in {"created_at", "read_at"}} for item in items]
+        self.db.execute(insert(NotificationModel).values(rows).on_conflict_do_nothing(index_elements=["event_key"]))
         if commit:
             self.db.commit()
-        else:
-            self.db.flush()
 
     def list_for_user(self, user_id: int, page: int, page_size: int, unread_only: bool):
         statement = select(NotificationModel).where(NotificationModel.recipient_user_id == user_id)
@@ -56,6 +55,88 @@ class NotificationRepository:
         self.db.commit()
         return len(items)
 
+    def resolve_stream_cursor(self, user_id: int, raw_cursor: str | None) -> tuple[datetime, str] | None:
+        if not raw_cursor or not raw_cursor.strip():
+            return None
+        value = raw_cursor.strip()
+        if "|" in value:
+            ts_part, notif_id = value.split("|", 1)
+            try:
+                parsed = datetime.fromisoformat(ts_part)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed, notif_id
+            except ValueError:
+                return None
+        row = self.db.execute(
+            select(NotificationModel.created_at, NotificationModel.id).where(
+                NotificationModel.id == value,
+                NotificationModel.recipient_user_id == user_id,
+            )
+        ).first()
+        if row:
+            return row[0], row[1]
+        return None
+
+    def latest_stream_cursor(self, user_id: int) -> tuple[datetime, str] | None:
+        row = self.db.execute(
+            select(NotificationModel.created_at, NotificationModel.id)
+            .where(NotificationModel.recipient_user_id == user_id)
+            .order_by(NotificationModel.created_at.desc(), NotificationModel.id.desc())
+            .limit(1)
+        ).first()
+        return (row[0], row[1]) if row else None
+
+    def unread_count_for_user(self, user_id: int) -> int:
+        return int(self.db.scalar(
+            select(func.count()).select_from(NotificationModel).where(
+                NotificationModel.recipient_user_id == user_id,
+                NotificationModel.status == "unread",
+            )
+        ) or 0)
+
+    def stream_updates(
+        self,
+        user_id: int,
+        cursor: tuple[datetime, str] | None,
+        *,
+        limit: int = 50,
+    ) -> tuple[int, list[NotificationModel], tuple[datetime, str] | None]:
+        unread_count = self.unread_count_for_user(user_id)
+        if cursor is None:
+            items = list(self.db.scalars(
+                select(NotificationModel)
+                .where(
+                    NotificationModel.recipient_user_id == user_id,
+                    NotificationModel.status == "unread",
+                )
+                .order_by(NotificationModel.created_at.asc(), NotificationModel.id.asc())
+                .limit(limit)
+            ).all())
+            next_cursor = (items[-1].created_at, items[-1].id) if items else self.latest_stream_cursor(user_id)
+            if next_cursor is None:
+                next_cursor = (datetime.now(timezone.utc), "")
+            return unread_count, items, next_cursor
+
+        cursor_ts, cursor_id = cursor
+        items = list(self.db.scalars(
+            select(NotificationModel)
+            .where(
+                NotificationModel.recipient_user_id == user_id,
+                or_(
+                    NotificationModel.created_at > cursor_ts,
+                    and_(
+                        NotificationModel.created_at == cursor_ts,
+                        NotificationModel.id > cursor_id,
+                    ),
+                ),
+            )
+            .order_by(NotificationModel.created_at.asc(), NotificationModel.id.asc())
+            .limit(limit)
+        ).all())
+        next_cursor = (items[-1].created_at, items[-1].id) if items else cursor
+        return unread_count, items, next_cursor
+
 
 class AftercareRepository:
     def __init__(self, db: Session):
@@ -64,8 +145,17 @@ class AftercareRepository:
     def ticket(self, ticket_id: str, lock: bool = False) -> TicketModel | None:
         statement = select(TicketModel).where(TicketModel.ticket_id == ticket_id.upper())
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         return self.db.scalar(statement)
+
+    def lock_ticket_for(self, related_model: type[FollowUpTaskModel] | type[AppealModel], related_id: str) -> TicketModel | None:
+        return self.db.scalar(
+            select(TicketModel)
+            .join(related_model, related_model.ticket_id == TicketModel.ticket_id)
+            .where(related_model.id == related_id)
+            .with_for_update(of=TicketModel)
+            .execution_options(populate_existing=True)
+        )
 
     def follow_up(self, task_id: str, lock: bool = False) -> FollowUpTaskModel | None:
         statement = select(FollowUpTaskModel).options(
@@ -73,7 +163,7 @@ class AftercareRepository:
             selectinload(FollowUpTaskModel.assignee),
         ).where(FollowUpTaskModel.id == task_id)
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         return self.db.scalar(statement)
 
     def appeal(self, appeal_id: str, lock: bool = False) -> AppealModel | None:
@@ -81,7 +171,7 @@ class AftercareRepository:
             selectinload(AppealModel.citizen), selectinload(AppealModel.reviewer)
         ).where(AppealModel.id == appeal_id)
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         return self.db.scalar(statement)
 
     def active_appeal(self, ticket_id: str) -> AppealModel | None:
@@ -126,28 +216,23 @@ class AftercareRepository:
                                      .offset((page - 1) * page_size).limit(page_size)).unique().all())
         return items, total
 
-    def due_soon_tickets(self, threshold: datetime) -> list[TicketModel]:
-        now = datetime.now(timezone.utc)
+    def _sla_tickets(self, matches) -> list[TicketModel]:
         return list(self.db.scalars(select(TicketModel).where(
-            TicketModel.status.in_(("pending", "accepted", "assigned", "processing")),
             TicketModel.sla_paused_at.is_(None),
             or_(
-                TicketModel.accept_due_at.between(now, threshold),
-                TicketModel.resolve_due_at.between(now, threshold),
+                (TicketModel.status == "pending") & matches(TicketModel.accept_due_at),
+                TicketModel.status.in_(("accepted", "assigned", "processing")) & matches(TicketModel.resolve_due_at),
             ),
         )).all())
 
-    def overdue_tickets(self) -> list[TicketModel]:
+    def due_soon_tickets(self, threshold: datetime, *, now: datetime | None = None) -> list[TicketModel]:
+        now = now or datetime.now(timezone.utc)
+        return self._sla_tickets(lambda deadline: deadline.between(now, threshold))
+
+    def overdue_tickets(self, *, now: datetime | None = None) -> list[TicketModel]:
         """Return tickets whose SLA deadline has already passed (P0-G escalation)."""
-        now = datetime.now(timezone.utc)
-        return list(self.db.scalars(select(TicketModel).where(
-            TicketModel.status.in_(("pending", "accepted", "assigned", "processing")),
-            TicketModel.sla_paused_at.is_(None),
-            or_(
-                (TicketModel.accept_due_at.is_not(None)) & (TicketModel.accept_due_at < now),
-                (TicketModel.resolve_due_at.is_not(None)) & (TicketModel.resolve_due_at < now),
-            ),
-        )).all())
+        now = now or datetime.now(timezone.utc)
+        return self._sla_tickets(lambda deadline: deadline < now)
 
     def commit(self) -> None:
         self.db.commit()

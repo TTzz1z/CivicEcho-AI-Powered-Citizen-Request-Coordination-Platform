@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -30,6 +30,7 @@ class UserModel(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     department_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("departments.id", ondelete="SET NULL"))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
     oidc_subject: Mapped[Optional[str]] = mapped_column(String(255), unique=True)
@@ -90,7 +91,7 @@ class TicketModel(Base):
     priority_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     priority_confirmed_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
-    source: Mapped[str] = mapped_column(String(32), nullable=False, default="rasa")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="web")
     accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -105,6 +106,7 @@ class TicketModel(Base):
     resolution_outcome: Mapped[Optional[str]] = mapped_column(String(32))
     public_reply: Mapped[Optional[str]] = mapped_column(Text)
     internal_note: Mapped[Optional[str]] = mapped_column(Text)
+    review_draft: Mapped[Optional[dict]] = mapped_column(JSON(none_as_null=True))
     rejection_reason_code: Mapped[Optional[str]] = mapped_column(String(64))
     rejection_detail: Mapped[Optional[str]] = mapped_column(Text)
     suggested_channel: Mapped[Optional[str]] = mapped_column(String(500))
@@ -150,6 +152,11 @@ class TicketModel(Base):
         Index("ix_tickets_accept_due", "accept_due_at"),
         Index("ix_tickets_resolve_due", "resolve_due_at"),
         Index("ix_tickets_external_reference", "external_platform", "external_ticket_id", unique=True),
+        Index("ix_tickets_dept_status_created", "assigned_department_id", "status", "created_at"),
+        Index("ix_tickets_assignee_status_created", "assigned_user_id", "status", "created_at"),
+        Index("ix_tickets_status_updated", "status", "updated_at"),
+        Index("ix_tickets_collab_status_created", "collaboration_status", "status", "created_at"),
+        Index("ix_tickets_status_paused_resolve_due", "status", "sla_paused_at", "resolve_due_at"),
     )
 
 
@@ -328,6 +335,7 @@ class NotificationModel(Base):
     __table_args__ = (
         Index("ix_notifications_recipient_status_created", "recipient_user_id", "status", "created_at"),
         Index("ix_notifications_ticket_created", "ticket_id", "created_at"),
+        Index("ix_notifications_recipient_created_id", "recipient_user_id", "created_at", "id"),
     )
 
 
@@ -481,6 +489,7 @@ class NotificationOutboxModel(Base):
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    traceparent: Mapped[Optional[str]] = mapped_column(String(55))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[Optional[str]] = mapped_column(String(500))
@@ -488,6 +497,7 @@ class NotificationOutboxModel(Base):
     __table_args__ = (
         Index("ix_outbox_status_next_retry", "status", "next_retry_at"),
         Index("ix_outbox_recipient_created", "recipient_user_id", "created_at"),
+        Index("ix_outbox_status_created", "status", "created_at"),
     )
 
 
@@ -556,6 +566,8 @@ class KbDocumentModel(Base):
     chunking_version: Mapped[Optional[str]] = mapped_column(String(32), default="v1")
     # Live retrieval batch. Rebuild writes a new batch first; switch only on full success.
     active_index_batch: Mapped[Optional[str]] = mapped_column(String(64))
+    index_lease_token: Mapped[Optional[str]] = mapped_column(String(64))
+    index_lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     published_department_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("departments.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -590,6 +602,7 @@ class KbChunkModel(Base):
     chunk_hash: Mapped[Optional[str]] = mapped_column(String(64))
     keywords: Mapped[Optional[str]] = mapped_column(Text)  # JSON array
     token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_metadata: Mapped[Optional[str]] = mapped_column(Text)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # P0-D chunk-level embedding metadata for traceability.
     embedding_model: Mapped[Optional[str]] = mapped_column(String(128))
@@ -606,6 +619,19 @@ class KbChunkModel(Base):
         Index("ix_kb_chunks_doc_idx", "document_id", "chunk_index"),
         Index("ix_kb_chunks_doc_idx_hash", "document_id", "chunk_hash"),
         Index("ix_kb_chunks_doc_batch", "document_id", "index_batch_id"),
+        Index(
+            "ix_kb_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        Index(
+            "ix_kb_chunks_content_trgm",
+            "content",
+            postgresql_using="gin",
+            postgresql_ops={"content": "gin_trgm_ops"},
+        ),
     )
 
 
@@ -674,6 +700,7 @@ class KbEvalRunModel(Base):
     provider: Mapped[Optional[str]] = mapped_column(String(64))
     model_name: Mapped[Optional[str]] = mapped_column(String(128))
     evaluator: Mapped[str] = mapped_column(String(64), default="rules")
+    metrics_json: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
@@ -762,6 +789,15 @@ class AiUsageLogModel(Base):
         Index("ix_ai_usage_logs_capability_created", "capability", "created_at"),
         Index("ix_ai_usage_logs_provider_created", "provider", "created_at"),
     )
+
+
+class ModelCallModel(Base):
+    __tablename__ = "model_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class AiUsageBudgetModel(Base):

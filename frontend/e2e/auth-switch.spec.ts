@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './browser-check'
 
 test('退出后切换角色会进入新账号工作台', async ({ page }) => {
   await page.route('**/api/v1/**', async route => {

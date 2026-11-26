@@ -13,7 +13,7 @@
 | `frontend` | React SPA + Nginx | `127.0.0.1:8080` |
 | `backend` | FastAPI | `127.0.0.1:8001`（故意绑 loopback） |
 | `postgres` | PostgreSQL 16、pgvector、pg_trgm | Compose 私有网络 |
-| `minio` | 本地演示附件与知识库对象存储 | 回环地址 `9000` / `9001` |
+| `minio` | 本地演示附件与知识库对象存储，使用 GHCR 公共镜像并固定镜像摘要 | 回环地址 `9000` / `9001` |
 | `worker` | SLA 扫描、通知 outbox、限流与会话清理 | 无业务端口暴露 |
 
 ### 生产等价（叠加 `docker-compose.prod.yml`）

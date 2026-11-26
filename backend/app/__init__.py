@@ -1,2 +1,2 @@
-"""Tingting ticket business service."""
+"""CivicEcho backend for citizen requests and cross-department coordination."""
 
